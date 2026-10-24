@@ -1,0 +1,15 @@
+# Chalkcast working dir (rendered scenes, frames, gifs)
+.chalkcast/
+media/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# OS / editor
+.DS_Store

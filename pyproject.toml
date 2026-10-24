@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chalkcast"
+version = "0.1.0"
+description = "Describe a concept. Get a verified animated explainer. An MCP server that authors, renders, and visually verifies Manim animations."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Chalkcast" }]
+keywords = ["mcp", "manim", "animation", "education", "stem", "agent", "llm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Education",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+  "mcp[cli]>=1.2.0",
+]
+
+[project.optional-dependencies]
+# Manim is a heavy, system-dependent install (cairo, pango, ffmpeg, a LaTeX
+# distribution for math). Kept optional so the server imports and the authoring
+# layer works even on a machine without a render engine.
+render = ["manim>=0.18.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+chalkcast = "chalkcast.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/chalkcast/chalkcast"
+Documentation = "https://github.com/chalkcast/chalkcast/blob/main/docs/SPEC.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chalkcast"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
