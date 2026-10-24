@@ -9,6 +9,11 @@ author, render, **and visually verify** [Manim](https://www.manim.community/)
 animations — so the output is a video that's actually correct on screen, not a
 plausible script that renders wrong.
 
+![license](https://img.shields.io/badge/license-MIT-blue)
+![python](https://img.shields.io/badge/python-3.11%2B-blue)
+![status](https://img.shields.io/badge/status-alpha-orange)
+![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)
+
 ![Chalkcast demo](assets/demo.gif)
 
 <sub>Authored, rendered, and verified entirely through the MCP server — Riemann
@@ -18,6 +23,15 @@ typeset integral, on the chalkboard theme.</sub>
 </div>
 
 ---
+
+## Who it's for
+
+- **Educators & students** — turn "explain the Fourier series" into a clean
+  animated explainer, without learning Manim or writing LaTeX by hand.
+- **STEM content creators** — produce 3Blue1Brown-style animations in minutes
+  instead of hours of coding and debugging renders.
+- **Agents & tooling** — a typed, verifiable MCP surface an AI can drive end to
+  end, with a verdict it can act on instead of a video it can't inspect.
 
 ## Why another Manim MCP?
 
@@ -41,23 +55,32 @@ Every render returns **evidence** (the artifact + sampled frames) and a structur
 
 ## Install
 
+From source (not yet on PyPI):
+
 ```bash
-pip install "chalkcast[render]"   # server + Manim
-# you also need a LaTeX distribution for math, and ffmpeg for GIF export
+git clone https://github.com/<you>/chalkcast.git
+cd chalkcast
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[render]"     # server + Manim
 ```
 
-Register with an MCP client (e.g. Claude Code):
+You also need **ffmpeg** (GIF/stitching) and, for equations, a **LaTeX**
+distribution (e.g. BasicTeX/TeX Live). Check what's present:
+
+```bash
+chalkcast doctor               # reports Manim / LaTeX / ffmpeg / vision providers
+chalkcast demo                 # builds + verifies + renders the demo scene
+```
+
+Register with an MCP client (e.g. Claude Code), then just ask in natural language:
 
 ```bash
 claude mcp add chalkcast -- chalkcast serve
 ```
 
-Check what's available on your machine:
-
-```bash
-chalkcast doctor   # reports Manim / LaTeX / ffmpeg / vision providers
-chalkcast demo     # builds + verifies (+ renders) the demo scene
-```
+> On a platform where Manim's native deps are awkward to install (e.g. an older
+> macOS without Homebrew bottles), see `scripts/dev-env.sh` and `scripts/serve.sh`,
+> which wire up a local libcairo + ffmpeg + LaTeX so the server renders anywhere.
 
 ## What the agent gets (v0.1 tools)
 
