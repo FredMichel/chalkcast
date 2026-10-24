@@ -58,7 +58,7 @@ Every render returns **evidence** (the artifact + sampled frames) and a structur
 From source (not yet on PyPI):
 
 ```bash
-git clone https://github.com/<you>/chalkcast.git
+git clone https://github.com/FredMichel/chalkcast.git
 cd chalkcast
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[render]"     # server + Manim

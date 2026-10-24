@@ -34,8 +34,8 @@ dev = ["pytest>=8.0"]
 chalkcast = "chalkcast.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/chalkcast/chalkcast"
-Documentation = "https://github.com/chalkcast/chalkcast/blob/main/docs/SPEC.md"
+Homepage = "https://github.com/FredMichel/chalkcast"
+Documentation = "https://github.com/FredMichel/chalkcast/blob/main/docs/SPEC.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chalkcast"]
