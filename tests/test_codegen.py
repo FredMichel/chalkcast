@@ -52,6 +52,21 @@ def test_area_and_riemann_codegen():
     assert "Create(riemann_3)" in code  # overlays use Create, not Write
 
 
+def test_plot_math_functions_usable_bare():
+    # regression: generated code lacked numpy, so expr='sin(x)' crashed the render.
+    from chalkcast.model import Obj, Project
+
+    proj = Project(id="p")
+    scene = proj.new_scene()
+    scene.objects.append(Obj(id="plot_1", kind="plot", payload={
+        "functions": [{"expr": "sin(x)"}], "x_range": [-3, 3, 1], "y_range": [-1, 1, 1]}))
+    scene.add_step("write", targets=["plot_1"])
+    code = generate_module(scene, "dark")
+    compile(code, "<p>", "exec")
+    assert "from numpy import" in code
+    assert "lambda x: sin(x)" in code
+
+
 def test_equation_backslashes_not_doubled():
     # regression: combining an r-prefix with repr() doubled every backslash,
     # turning \int into \\int (a LaTeX line break) and garbling the math.

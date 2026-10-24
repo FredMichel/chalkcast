@@ -220,7 +220,11 @@ def generate_module(scene: Scene, theme_name: str) -> str:
     """A complete, runnable Manim module for a single scene."""
     t = theme(theme_name)
     header = (
-        "from manim import *\n\n"
+        "from manim import *\n"
+        "import numpy as np\n"
+        # make common math usable bare in plot expressions, e.g. add_plot(expr='sin(x)')
+        "from numpy import (sin, cos, tan, exp, sqrt, log, log10, log2, sinh, cosh,\n"
+        "                   tanh, arcsin, arccos, arctan, floor, ceil, pi, e)\n\n"
         f'config.background_color = "{t["background_color"]}"\n\n'
     )
     return header + generate_scene_code(scene, theme_name)

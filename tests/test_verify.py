@@ -22,13 +22,24 @@ def test_demo_scene_passes():
     assert insp["verdict"]["status"] in ("pass", "pass_with_warnings")
 
 
-def test_framing_lane_flags_offscreen_object():
+def test_framing_lane_flags_offscreen_center_as_error():
     scene = _scene_with(Obj(id="text_1", kind="text", position=(20, 0),
                             payload={"text": "way off", "font_size": 36}))
     insp = inspect_scene(scene)
-    lanes = {o["lane"] for o in insp["obligations"]}
-    assert "framing" in lanes
+    framing = [o for o in insp["obligations"] if o["lane"] == "framing"]
+    assert framing and framing[0]["severity"] == "error"
     assert insp["verdict"]["status"] == "needs_fix"
+
+
+def test_framing_estimate_overflow_is_warning_not_error():
+    # center in-frame but a huge estimated bbox: this is an estimate, so it must
+    # be a warning (never an error), otherwise it would wrongly block export.
+    scene = _scene_with(Obj(id="text_1", kind="text", position=(0, 0),
+                            payload={"text": "x" * 200, "font_size": 40}))
+    insp = inspect_scene(scene)
+    framing = [o for o in insp["obligations"] if o["lane"] == "framing"]
+    assert framing and framing[0]["severity"] == "warning"
+    assert insp["verdict"]["errors"] == 0
 
 
 def test_timing_lane_flags_highlight_before_write():

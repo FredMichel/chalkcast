@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .geometry import within_safe_area
+from .geometry import FRAME_HEIGHT, FRAME_WIDTH, within_safe_area
 from .model import Scene
 
 COLLISION_THRESHOLD = 0.35  # overlap as a fraction of the smaller object's area
@@ -39,11 +39,21 @@ def _obl(scene_id: str, lane: str, severity: str, summary: str, fix: str, step: 
 def _lane_framing(scene: Scene) -> list[dict[str, Any]]:
     out = []
     for obj in scene.objects:
-        if not within_safe_area(obj.estimate_bbox()):
+        cx, cy = obj.position
+        # A center outside the frame is definitely wrong -> error.
+        if abs(cx) > FRAME_WIDTH / 2 or abs(cy) > FRAME_HEIGHT / 2:
             out.append(_obl(
                 scene.id, "framing", "error",
-                f"object '{obj.id}' extends outside the safe area",
-                "move it toward the center or reduce its scale",
+                f"object '{obj.id}' is positioned off-screen (center at {cx:.1f},{cy:.1f})",
+                "move its position back inside the frame",
+            ))
+        # A bbox that crosses the safe area is only an *estimate* (font/LaTeX
+        # width is unknown pre-render) -> warning, so it never blocks export.
+        elif not within_safe_area(obj.estimate_bbox()):
+            out.append(_obl(
+                scene.id, "framing", "warning",
+                f"object '{obj.id}' may extend outside the safe area (estimated)",
+                "nudge it toward the center or reduce its scale if the render confirms it",
             ))
     return out
 

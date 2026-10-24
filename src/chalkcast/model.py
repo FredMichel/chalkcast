@@ -14,10 +14,21 @@ rough (font metrics are unknown pre-render) and callers surface that in
 from __future__ import annotations
 
 import itertools
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .geometry import BBox
+
+_LATEX_CMD = re.compile(r"\\[a-zA-Z]+")
+
+
+def latex_visible_len(tex: str) -> int:
+    """Rough count of *rendered* glyphs in a LaTeX string: drop \\commands and
+    structural characters so width estimates don't balloon on \\frac, \\sin, {}."""
+    s = _LATEX_CMD.sub("x", tex)          # each command ~ one glyph-ish
+    s = re.sub(r"[{}$^_&~\\ ]", "", s)     # braces, scripts, spaces, stray backslashes
+    return max(len(s), 1)
 
 # ---------------------------------------------------------------------------
 # Visual objects
@@ -44,10 +55,11 @@ class Obj:
 
     def _estimate_size(self) -> tuple[float, float]:
         if self.kind == "equation":
-            # LaTeX width is unknown until typeset; estimate from token length.
+            # LaTeX width is unknown until typeset; estimate from visible glyphs
+            # (ignoring \commands and braces) so \frac/\sin don't inflate it.
             tex = str(self.payload.get("tex", ""))
-            n = max(len(tex.replace(" ", "")), 1)
-            return (min(0.32 * n, 12.0), 0.9)
+            n = latex_visible_len(tex)
+            return (min(0.33 * n, 12.0), 0.9)
         if self.kind == "text":
             text = str(self.payload.get("text", ""))
             font_size = float(self.payload.get("font_size", 36))
