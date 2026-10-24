@@ -50,7 +50,8 @@ def _lane_framing(scene: Scene) -> list[dict[str, Any]]:
 
 def _lane_collision(scene: Scene) -> list[dict[str, Any]]:
     out = []
-    objs = scene.objects
+    # area/riemann overlays are meant to sit on top of their parent plot
+    objs = [o for o in scene.objects if o.kind not in ("area", "riemann")]
     for i in range(len(objs)):
         for j in range(i + 1, len(objs)):
             a, b = objs[i].estimate_bbox(), objs[j].estimate_bbox()

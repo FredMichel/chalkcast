@@ -170,6 +170,48 @@ def add_shape(shape: str = "circle", size: float = 1.0, x: float = 0, y: float =
 
 
 @mcp.tool()
+def add_area(plot_id: str, x_min: float = 0.0, x_max: float = 1.0, function_index: int = 1,
+             color: str | None = "BLUE", opacity: float = 0.5,
+             scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
+    """Shade the area under a plotted function between x_min and x_max (the integral)."""
+    got = _require_scene(project_id, scene_id)
+    if isinstance(got, dict):
+        return got
+    _, scene = got
+    plot = scene.get_obj(plot_id)
+    if plot is None or plot.kind != "plot":
+        return err(f"add_area needs a valid plot_id; '{plot_id}' is not a plot")
+    oid = scene.new_obj_id("area")
+    from .model import Obj
+    scene.objects.append(Obj(id=oid, kind="area", position=plot.position, color=color, payload={
+        "plot": plot_id, "fn": function_index, "x_min": x_min, "x_max": x_max, "opacity": opacity,
+        "width": plot.payload.get("width", 6), "height": plot.payload.get("height", 4),
+    }))
+    return ok({"object_id": oid})
+
+
+@mcp.tool()
+def add_riemann(plot_id: str, x_min: float = 0.0, x_max: float = 1.0, dx: float = 0.1,
+                function_index: int = 1, color: str | None = "BLUE",
+                scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
+    """Riemann rectangles under a plotted function (smaller dx = finer; transform coarse->fine to show convergence)."""
+    got = _require_scene(project_id, scene_id)
+    if isinstance(got, dict):
+        return got
+    _, scene = got
+    plot = scene.get_obj(plot_id)
+    if plot is None or plot.kind != "plot":
+        return err(f"add_riemann needs a valid plot_id; '{plot_id}' is not a plot")
+    oid = scene.new_obj_id("riemann")
+    from .model import Obj
+    scene.objects.append(Obj(id=oid, kind="riemann", position=plot.position, color=color, payload={
+        "plot": plot_id, "fn": function_index, "x_min": x_min, "x_max": x_max, "dx": dx,
+        "width": plot.payload.get("width", 6), "height": plot.payload.get("height", 4),
+    }))
+    return ok({"object_id": oid})
+
+
+@mcp.tool()
 def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
              duration: float = 1.0, note: str = "", zoom: float | None = None,
              focus_x: float = 0, focus_y: float = 0,

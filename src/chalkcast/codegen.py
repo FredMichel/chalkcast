@@ -67,10 +67,42 @@ def _define_object(obj: Obj, ink: str) -> list[str]:
     elif obj.kind == "plot":
         lines.extend(_define_plot(obj, ink))
 
+    elif obj.kind == "area":
+        lines.append(_define_area(obj))
+
+    elif obj.kind == "riemann":
+        lines.append(_define_riemann(obj))
+
     else:  # pragma: no cover - guarded by the authoring layer
         raise ValueError(f"unknown object kind: {obj.kind}")
 
     return lines
+
+
+def _define_area(obj: Obj) -> str:
+    p = obj.payload
+    plot = p["plot"]
+    fn = int(p.get("fn", 1))
+    a, b = p.get("x_min", 0), p.get("x_max", 1)
+    col = _color(obj.color, "#5a8fd6")
+    op = float(p.get("opacity", 0.5))
+    return (
+        f"{obj.id} = {plot}_ax.get_area({plot}_g{fn}, x_range=[{a}, {b}], "
+        f"color={col}, opacity={op})"
+    )
+
+
+def _define_riemann(obj: Obj) -> str:
+    p = obj.payload
+    plot = p["plot"]
+    fn = int(p.get("fn", 1))
+    a, b = p.get("x_min", 0), p.get("x_max", 1)
+    dx = float(p.get("dx", 0.1))
+    col = _color(obj.color, "#5a8fd6")
+    return (
+        f"{obj.id} = {plot}_ax.get_riemann_rectangles({plot}_g{fn}, "
+        f"x_range=[{a}, {b}], dx={dx}, color={col}, fill_opacity=0.6, stroke_width=0.5)"
+    )
 
 
 def _define_shape(obj: Obj, ink: str) -> str:
@@ -125,7 +157,7 @@ def _define_plot(obj: Obj, ink: str) -> list[str]:
 
 def _introduce_anim(obj: Obj | None) -> str:
     """Pick a natural 'appear' animation for a target object."""
-    if obj is not None and obj.kind in ("shape", "plot"):
+    if obj is not None and obj.kind in ("shape", "plot", "area", "riemann"):
         return "Create"
     return "Write"
 

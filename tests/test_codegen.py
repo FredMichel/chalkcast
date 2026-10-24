@@ -30,6 +30,28 @@ def test_equation_codegen():
     assert "MathTex(" in code
 
 
+def test_area_and_riemann_codegen():
+    from chalkcast.model import Obj, Project
+
+    proj = Project(id="p")
+    scene = proj.new_scene()
+    scene.objects.append(Obj(id="plot_1", kind="plot", payload={
+        "functions": [{"expr": "x**2", "color": "YELLOW"}], "x_range": [0, 2, 1],
+        "y_range": [0, 4, 1], "width": 6, "height": 4}))
+    scene.objects.append(Obj(id="area_2", kind="area", color="BLUE",
+                             payload={"plot": "plot_1", "fn": 1, "x_min": 0, "x_max": 1, "opacity": 0.6}))
+    scene.objects.append(Obj(id="riemann_3", kind="riemann", color="TEAL",
+                             payload={"plot": "plot_1", "fn": 1, "x_min": 0, "x_max": 1, "dx": 0.1}))
+    scene.add_step("write", targets=["plot_1"])
+    scene.add_step("write", targets=["riemann_3"])
+    scene.add_step("transform", targets=["riemann_3"], to="area_2")
+    code = generate_module(scene, "chalkboard")
+    compile(code, "<area>", "exec")
+    assert "plot_1_ax.get_area(plot_1_g1" in code
+    assert "plot_1_ax.get_riemann_rectangles(plot_1_g1" in code
+    assert "Create(riemann_3)" in code  # overlays use Create, not Write
+
+
 def test_equation_backslashes_not_doubled():
     # regression: combining an r-prefix with repr() doubled every backslash,
     # turning \int into \\int (a LaTeX line break) and garbling the math.

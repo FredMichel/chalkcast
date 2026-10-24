@@ -11,9 +11,9 @@ plausible script that renders wrong.
 
 ![Chalkcast demo](assets/demo.gif)
 
-<sub>Authored, rendered, and verified entirely through the MCP server — the
-chalkboard theme, a typeset LaTeX integral, the parabola, and a highlighted point,
-from a handful of tool calls.</sub>
+<sub>Authored, rendered, and verified entirely through the MCP server — Riemann
+rectangles refine and converge into the shaded area under y = x², synced with the
+typeset integral, on the chalkboard theme.</sub>
 
 </div>
 
@@ -64,7 +64,7 @@ chalkcast demo     # builds + verifies (+ renders) the demo scene
 | Group | Tools |
 |---|---|
 | **Session** | `open_project` · `inspect_project` · `close_project` |
-| **Authoring** | `add_scene` · `add_equation` · `add_plot` · `add_text` · `add_shape` · `add_step` |
+| **Authoring** | `add_scene` · `add_equation` · `add_plot` · `add_area` · `add_riemann` · `add_text` · `add_shape` · `add_step` |
 | **Rendering** | `render_scene` · `render_frame` |
 | **Verification** | `inspect_render` (framing · collision · legibility · timing · compile lanes) |
 | **Export** | `export_gif` |

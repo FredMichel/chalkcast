@@ -23,7 +23,7 @@ from .geometry import BBox
 # Visual objects
 # ---------------------------------------------------------------------------
 
-ObjKind = Literal["equation", "plot", "text", "shape"]
+ObjKind = Literal["equation", "plot", "text", "shape", "area", "riemann"]
 ShapeKind = Literal["circle", "square", "rectangle", "triangle", "arrow", "dot", "line"]
 
 
@@ -51,12 +51,19 @@ class Obj:
         if self.kind == "text":
             text = str(self.payload.get("text", ""))
             font_size = float(self.payload.get("font_size", 36))
-            # ~0.012 units per pt per char, line height ~font_size*0.016.
-            return (max(0.012 * font_size * max(len(text), 1), 0.4), font_size * 0.016)
+            # ~0.0075 units per pt per char (calibrated against rendered Text so
+            # the framing lane doesn't false-positive); line height ~font_size*0.016.
+            return (max(0.0075 * font_size * max(len(text), 1), 0.4), font_size * 0.016)
         if self.kind == "plot":
             return (
                 float(self.payload.get("width", 8.0)),
                 float(self.payload.get("height", 5.0)),
+            )
+        if self.kind in ("area", "riemann"):
+            # overlays its parent plot; bbox copied from the plot at authoring time
+            return (
+                float(self.payload.get("width", 6.0)),
+                float(self.payload.get("height", 4.0)),
             )
         if self.kind == "shape":
             shape = self.payload.get("shape", "circle")
