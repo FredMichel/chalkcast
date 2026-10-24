@@ -48,7 +48,10 @@ def _define_object(obj: Obj, ink: str) -> list[str]:
     if obj.kind == "equation":
         tex = p.get("tex", "")
         col = _color(obj.color, ink)
-        lines.append(f"{var} = MathTex(r{tex!r}, color={col}){_scale(obj)}{_pos(obj)}")
+        # repr() already emits a valid Python literal with backslashes escaped;
+        # adding an r-prefix on top would DOUBLE the backslashes (\int -> \\int,
+        # a LaTeX line break), so pass repr() alone.
+        lines.append(f"{var} = MathTex({tex!r}, color={col}){_scale(obj)}{_pos(obj)}")
 
     elif obj.kind == "text":
         text = p.get("text", "")

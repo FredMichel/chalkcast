@@ -64,6 +64,7 @@ def render_scene(project: Project, scene: Scene, workdir: Path, *, single_frame:
             "hint": "pip install 'chalkcast[render]' and a LaTeX distribution for math",
         }
 
+    workdir = workdir.resolve()  # absolute, so cwd=workdir never double-counts
     workdir.mkdir(parents=True, exist_ok=True)
     module_path = workdir / f"{scene.class_name()}.py"
     module_path.write_text(generate_module(scene, project.theme), encoding="utf-8")
@@ -73,7 +74,8 @@ def render_scene(project: Project, scene: Scene, workdir: Path, *, single_frame:
     cmd = ["manim", "render", flag, "--media_dir", str(media_dir)]
     if single_frame:
         cmd.append("-s")  # last-frame still (fast preview)
-    cmd += [str(module_path), scene.class_name()]
+    # module arg is the bare filename because we run with cwd=workdir
+    cmd += [module_path.name, scene.class_name()]
 
     t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))

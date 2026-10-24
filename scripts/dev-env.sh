@@ -17,6 +17,9 @@ export DYLD_FALLBACK_LIBRARY_PATH="$HOME/.local/chalkcast-deps/cairo/lib:/opt/ho
 # ffmpeg (installed via the imageio-ffmpeg pip package, symlinked here)
 export PATH="$HOME/.local/bin:$PATH"
 
+# LaTeX (BasicTeX) for MathTex/equation rendering, if installed
+[ -d /Library/TeX/texbin ] && export PATH="/Library/TeX/texbin:$PATH"
+
 # activate the project venv if present
 [ -f "$_here/.venv/bin/activate" ] && source "$_here/.venv/bin/activate"
 

@@ -12,8 +12,8 @@ plausible script that renders wrong.
 ![Chalkcast demo](assets/demo.gif)
 
 <sub>Authored, rendered, and verified entirely through the MCP server — the
-chalkboard theme, the parabola, and the highlighted point, from a handful of tool
-calls.</sub>
+chalkboard theme, a typeset LaTeX integral, the parabola, and a highlighted point,
+from a handful of tool calls.</sub>
 
 </div>
 

@@ -30,6 +30,20 @@ def test_equation_codegen():
     assert "MathTex(" in code
 
 
+def test_equation_backslashes_not_doubled():
+    # regression: combining an r-prefix with repr() doubled every backslash,
+    # turning \int into \\int (a LaTeX line break) and garbling the math.
+    from chalkcast.model import Obj, Project
+
+    tex = r"\int_0^1 x^2 \, dx"
+    proj = Project(id="p")
+    scene = proj.new_scene()
+    scene.objects.append(Obj(id="equation_1", kind="equation", payload={"tex": tex}))
+    code = generate_module(scene, "dark")
+    assert "MathTex(r" not in code   # no raw-string prefix on the tex
+    assert repr(tex) in code         # the correctly-escaped literal is present
+
+
 def test_shape_and_camera_codegen():
     from chalkcast.model import Obj, Project
 
