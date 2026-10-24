@@ -116,15 +116,20 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
              x_range: list[float] | None = None, y_range: list[float] | None = None,
              x: float = 0, y: float = 0, width: float = 8.0, height: float = 5.0,
              scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
-    """Add axes with one or more functions. functions=[{'expr':'x**2','color':'YELLOW'}]."""
+    """Add axes with functions. Each function: {'expr':'x**2','color':'YELLOW',
+    'smooth':true,'dx':0.05}. Set smooth=false (and a small dx) for discontinuous/
+    piecewise functions so spline smoothing doesn't invent oscillations. Pass
+    functions=[] for bare axes; omit it for a default parabola."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
     _, scene = got
     oid = scene.new_obj_id("plot")
+    # None -> convenience default; explicit [] -> axes only (no surprise parabola)
+    funcs = [{"expr": "x**2"}] if functions is None else functions
     from .model import Obj
     scene.objects.append(Obj(id=oid, kind="plot", position=(x, y), payload={
-        "functions": functions or [{"expr": "x**2"}],
+        "functions": funcs,
         "x_range": x_range or [-5, 5, 1],
         "y_range": y_range or [-3, 3, 1],
         "width": width, "height": height,

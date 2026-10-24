@@ -145,11 +145,21 @@ def _define_plot(obj: Obj, ink: str) -> list[str]:
         f"x_length={width}, y_length={height}, axis_config={{'color': {_color(None, ink)}}})",
     ]
     members = [ax]
+    xr = list(x_range)
     for i, fn in enumerate(p.get("functions", []), start=1):
-        expr = fn.get("expr", "x") if isinstance(fn, dict) else str(fn)
-        fcol = _color(fn.get("color") if isinstance(fn, dict) else None, obj.color or "#f6c76b")
+        is_d = isinstance(fn, dict)
+        expr = fn.get("expr", "x") if is_d else str(fn)
+        fcol = _color(fn.get("color") if is_d else None, obj.color or "#f6c76b")
+        # smooth=False draws straight segments between samples -> correct for
+        # discontinuous/piecewise functions (no fake Gibbs from spline smoothing).
+        smooth = fn.get("smooth", True) if is_d else True
+        extra = f", use_smoothing={bool(smooth)}"
+        # optional per-function sampling step (dx): finer sampling for sharp features.
+        dx = fn.get("dx") if is_d else None
+        if dx is not None:
+            extra += f", x_range=[{xr[0]}, {xr[1]}, {dx}]"
         gvar = f"{var}_g{i}"
-        lines.append(f"{gvar} = {ax}.plot(lambda x: {expr}, color={fcol})")
+        lines.append(f"{gvar} = {ax}.plot(lambda x: {expr}, color={fcol}{extra})")
         members.append(gvar)
     lines.append(f"{var} = VGroup({', '.join(members)}){_scale(obj)}{_pos(obj)}")
     return lines

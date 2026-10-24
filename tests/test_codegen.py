@@ -67,6 +67,36 @@ def test_plot_math_functions_usable_bare():
     assert "lambda x: sin(x)" in code
 
 
+def test_plot_smooth_false_and_dx():
+    # discontinuous functions: straight segments + fine sampling, no fake Gibbs
+    from chalkcast.model import Obj, Project
+
+    proj = Project(id="p")
+    scene = proj.new_scene()
+    scene.objects.append(Obj(id="plot_1", kind="plot", payload={
+        "functions": [{"expr": "np.sign(sin(x))", "smooth": False, "dx": 0.02}],
+        "x_range": [-3, 3, 1], "y_range": [-1.5, 1.5, 0.5]}))
+    scene.add_step("write", targets=["plot_1"])
+    code = generate_module(scene, "dark")
+    compile(code, "<p>", "exec")
+    assert "use_smoothing=False" in code
+    assert "x_range=[-3, 3, 0.02]" in code
+
+
+def test_plot_empty_functions_gives_bare_axes():
+    # regression: an explicit empty functions list must not inject a default parabola
+    from chalkcast.model import Obj, Project
+
+    proj = Project(id="p")
+    scene = proj.new_scene()
+    scene.objects.append(Obj(id="plot_1", kind="plot", payload={
+        "functions": [], "x_range": [-5, 5, 1], "y_range": [-3, 3, 1]}))
+    code = generate_module(scene, "dark")
+    compile(code, "<p>", "exec")
+    assert ".plot(" not in code             # no graph drawn
+    assert "VGroup(plot_1_ax)" in code      # axes only
+
+
 def test_equation_backslashes_not_doubled():
     # regression: combining an r-prefix with repr() doubled every backslash,
     # turning \int into \\int (a LaTeX line break) and garbling the math.
