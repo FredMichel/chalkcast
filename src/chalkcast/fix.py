@@ -92,7 +92,8 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
 
 
 def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
-                measurement: dict[str, Any] | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                measurement: dict[str, Any] | None,
+                attempts: dict[str, int] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply mechanical fixes in place. Returns (changes, unresolved obligations)."""
     geo = Geometry(scene, measurement)
     changes: list[dict[str, Any]] = []
@@ -125,7 +126,8 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                             "reason": f"{o['summary']} (moved its plot)"})
 
         elif lane == "framing" and obj is not None and geo.measured and oid not in touched:
-            if obj.payload.get("anchor"):
+            if obj.payload.get("anchor") or "x2" in obj.payload:
+                # anchored / explicit segment: placed by plot coords or endpoints
                 unresolved.append(o)  # moves with a parameter: needs a different range
                 continue
             box = geo.bbox(oid)
@@ -174,7 +176,14 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 unresolved.append(o)
                 continue
             fn = fns[i]
-            if "smooth" in fn or "dx" in fn:
+            key = f"{oid}:{i}"
+            stage = (attempts or {}).get(key, 0)
+            if attempts is not None:
+                attempts[key] = stage + 1
+            if stage >= 2 or (stage == 1 and fn.get("smooth") is False and "dx" in fn):
+                unresolved.append(o)  # both repairs tried: needs the author
+                continue
+            if stage == 0 and ("smooth" in fn or "dx" in fn):
                 removed = [k for k in ("smooth", "dx") if k in fn]
                 for k in removed:
                     fn.pop(k)

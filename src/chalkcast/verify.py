@@ -165,6 +165,59 @@ def is_dynamic(obj: Obj, scene: Scene) -> bool:
                         uses_params(str(a.get("y", "")), scene.params))
 
 
+def obj_params(obj: Obj | None, scene: Scene) -> set[str]:
+    """Scene parameters an object is redrawn from."""
+    if obj is None:
+        return set()
+    if obj.kind in ("area", "riemann"):
+        return obj_params(scene.get_obj(obj.payload.get("plot", "")), scene)
+    exprs: list[str] = []
+    if obj.kind == "plot":
+        exprs = [str(f.get("expr", "") if isinstance(f, dict) else f)
+                 for f in obj.payload.get("functions", [])]
+    elif obj.payload.get("anchor"):
+        a = obj.payload["anchor"]
+        exprs = [str(a.get("x", "")), str(a.get("y", ""))]
+    return {p for p in scene.params if any(uses_params(e, {p: 0.0}) for e in exprs)}
+
+
+def _beats(scene: Scene) -> list[list]:
+    beats: list[list] = []
+    for st in scene.steps:
+        if st.with_previous and beats:
+            beats[-1].append(st)
+        else:
+            beats.append([st])
+    return beats
+
+
+def beat_conflicts(scene: Scene, only_step: int | None = None) -> list[str]:
+    """A parameter-driven object written/highlighted/faded in the same beat as a tween
+    of its parameter: Manim suspends its redraw during that animation, so it freezes
+    and then jumps."""
+    out = []
+    for beat in _beats(scene):
+        tweened = {st.param for st in beat if st.kind == "tween"}
+        if not tweened or (only_step is not None and only_step not in [st.index for st in beat]):
+            continue
+        for st in beat:
+            if st.kind not in ("write", "highlight", "fade"):
+                continue
+            for tid in st.targets:
+                hit = obj_params(scene.get_obj(tid), scene) & tweened
+                if hit:
+                    out.append(f"step {st.index} ({st.kind}s '{tid}') shares a beat with a tween of "
+                               f"{sorted(hit)}, which '{tid}' is drawn from: it would freeze during "
+                               "the animation and then jump; put the tween in its own step")
+    return out
+
+
+def unused_tweens(scene: Scene) -> list[int]:
+    used = set().union(*(obj_params(o, scene) for o in scene.objects)) if scene.objects else set()
+    return [st.index for st in scene.steps if st.kind == "tween" and st.param in scene.params
+            and st.param not in used]
+
+
 def _camera_views(scene: Scene) -> dict[int, BBox]:
     """Camera frame (absolute zoom, kept centre) at each write step, when zoomed."""
     zoom, cx, cy, views = 1.0, 0.0, 0.0, {}
@@ -324,11 +377,25 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     return out
 
 
+def _zoom_at_write(scene: Scene) -> dict[str, float]:
+    """Camera zoom when each object is first written (1 = full frame)."""
+    zoom, out = 1.0, {}
+    for st in scene.steps:
+        if st.kind == "camera_move" and st.to:
+            zoom = float(st.to.partition("@")[0] or 1)
+        elif st.kind == "write":
+            for t in st.targets:
+                out.setdefault(t, zoom)
+    return out
+
+
 def _lane_legibility(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     out = []
+    zoom = _zoom_at_write(scene)  # a zoomed-out camera shrinks everything on screen
     for obj in scene.objects:
+        z = zoom.get(obj.id, 1.0)
         if obj.kind == "text":
-            fs = float(obj.payload.get("font_size", 36)) * obj.scale
+            fs = float(obj.payload.get("font_size", 36)) * obj.scale * z
             if fs < MIN_FONT_SIZE:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"text '{obj.id}' renders at ~{fs:.0f}pt (below {MIN_FONT_SIZE:.0f}pt)",
@@ -336,13 +403,13 @@ def _lane_legibility(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         elif obj.kind == "equation":
             # glyph size is what matters: a tall fraction can hide tiny symbols
             # (not the box height: a lone '=' or '-' is short at any size)
-            fs = MATHTEX_FONT_SIZE * obj.scale
+            fs = MATHTEX_FONT_SIZE * obj.scale * z
             if fs < MIN_FONT_SIZE:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"equation '{obj.id}' is too small to read (~{fs:.0f}pt)",
                                 "increase its scale", target=obj.id))
         elif obj.kind == "plot" and obj.payload.get("show_numbers"):
-            fs = TICK_FONT_SIZE * obj.scale
+            fs = TICK_FONT_SIZE * obj.scale * z
             if fs < MIN_FONT_SIZE:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"tick numbers of '{obj.id}' render at ~{fs:.0f}pt (below "
@@ -416,6 +483,13 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
                 out.append(_obl(scene.id, "timing", "error",
                                 f"step {step.index} transforms into undefined object '{step.to}'",
                                 f"create object '{step.to}' before the transform", step=step.index))
+    for msg in beat_conflicts(scene):
+        out.append(_obl(scene.id, "timing", "error", msg, "put the tween in its own step"))
+    for idx in unused_tweens(scene):
+        out.append(_obl(scene.id, "timing", "warning",
+                        f"step {idx} tweens '{scene.steps[idx - 1].param}', which no object uses: "
+                        "nothing moves", "use the parameter in an expression or anchor, or drop "
+                        "the step", step=idx))
     # Objects that are defined but never appear are almost always a forgotten step.
     if scene.steps:
         used = set()
@@ -436,7 +510,18 @@ def _lane_fidelity(scene: Scene, geo: Geometry) -> tuple[list[dict[str, Any]], l
     for obj in scene.objects:
         if obj.kind != "plot":
             continue
-        for c in geo.curves(obj.id):
+        # the curve as first drawn, then where each tween leaves it
+        states = [c for st in geo.states for c in st.get("curves", {}).get(obj.id, [])]
+        worst: dict[int, dict[str, Any]] = {}
+        for c in list(geo.curves(obj.id)) + states:
+            i = c.get("fn")
+            w = worst.setdefault(i, dict(c))
+            for key in ("max_error", "clipped_fraction"):
+                if float(c.get(key, 0.0)) > float(w.get(key, 0.0)):
+                    w[key] = c[key]
+                    if key == "max_error":
+                        w["at_x"] = c.get("at_x")
+        for c in worst.values():
             i = c.get("fn")
             err = float(c.get("max_error", 0.0))
             if err > FIDELITY_TOLERANCE:
@@ -470,6 +555,11 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
     geo = Geometry(scene, measurement)
 
     compile_failed = measurement is not None and measurement.get("ok") is False
+    if measurement is not None and measurement.get("timeout"):
+        obligations.append(_obl(scene.id, "measure", "warning",
+                                str(measurement.get("error")) + "; geometry is estimated",
+                                "reduce sampling cost (fewer/shorter tweens, narrower ranges) "
+                                "to get measured verification"))
     if render_report is not None or compile_failed:
         lanes_run.append("compile")
     if compile_failed:

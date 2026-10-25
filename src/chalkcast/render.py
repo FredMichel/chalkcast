@@ -97,7 +97,7 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
         for k in range(1, TWEEN_SAMPLES + 1):
             a = k / TWEEN_SAMPLES
             vals = {**start, **{p: start[p] + a * (v - start[p]) for p, v in beat.items()}}
-            states.append({"step": beat_step, "params": vals})
+            states.append({"step": beat_step, "params": vals, "beat_end": k == TWEEN_SAMPLES})
         cur.update(beat)
         beat.clear()
 
@@ -132,7 +132,9 @@ def probe_scene(project: Project, scene: Scene, workdir: Path, timeout: float = 
         proc = subprocess.run([sys.executable, "-m", "chalkcast.probe", str(module_path), str(spec_path)],
                               capture_output=True, text=True, cwd=str(workdir), timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"probe timed out after {timeout:.0f}s"}
+        # slow to measure is not broken: fall back to estimated geometry, say why
+        return {"ok": None, "timeout": True,
+                "error": f"geometry probe timed out after {timeout:.0f}s"}
     marker = "@@CHALKCAST_PROBE@@"
     if marker not in proc.stdout:
         return {"ok": False, "error": "probe crashed", "traceback": proc.stderr[-2500:]}

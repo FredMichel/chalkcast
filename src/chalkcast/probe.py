@@ -260,7 +260,7 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
         for name, val in st["params"].items():
             if name in P:
                 P[name].set_value(val)
-        boxes, ink_at = {}, {}
+        boxes, ink_at, curves_at = {}, {}, {}
         for o in spec["objects"]:
             m = ns.get(o["id"])
             if m is None or not o.get("dynamic"):
@@ -271,15 +271,23 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
             boxes[o["id"]] = _bbox(m)
             # what a label must not sit on at this moment
             if o["kind"] == "plot":
-                pts = []
+                pts, curves = [], []
                 for i in range(1, o.get("n_functions", 0) + 1):
-                    pts += _path_samples(ns[f"{o['id']}_g{i}"], per_leaf=200)
+                    g = ns[f"{o['id']}_g{i}"]
+                    pts += _path_samples(g, per_leaf=200)
+                    if st.get("beat_end"):  # fidelity/clipping where each tween lands
+                        ax, f = ns[f"{o['id']}_ax"], ns[f"{o['id']}_f{i}"]
+                        fid = _fidelity(ax, f, g)
+                        curves.append({"fn": i, "max_error": fid["max_error"], "at_x": fid["at_x"],
+                                       "clipped_fraction": _clipped_fraction(ax, f)})
                 ink_at[o["id"]] = pts
+                if curves:
+                    curves_at[o["id"]] = curves
             elif o["kind"] == "shape":
                 ink_at[o["id"]] = _ink(m, o["kind"])
         if boxes:
             states.append({"step": st["step"], "params": st["params"], "objects": boxes,
-                           "ink": ink_at})
+                           "ink": ink_at, "curves": curves_at})
     return {"ok": True, "objects": objects, "plots": plots, "ink": ink, "states": states}
 
 

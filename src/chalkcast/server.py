@@ -34,7 +34,7 @@ from .envelope import err, ok
 from .expr import ExprError, compile_fn, validate
 from .fix import apply_fixes
 from .model import STEP_KINDS, Obj, Project, Scene
-from .verify import GEOMETRIC_LANES, inspect_scene, is_dynamic
+from .verify import GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
 
 mcp = _Server("chalkcast")
 
@@ -43,6 +43,8 @@ _HEX = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {"x", "np", "P", "ns", "self", "e", "pi"}
 _DEFAULT_FPS = {"low": 15, "medium": 30, "high": 60}
+# builtins usable in expressions; a parameter must not shadow them
+_SAFE_NAMES = {"sum", "range", "abs", "min", "max", "float", "int"}
 _STEP_ARGS: dict[str, set[str]] = {
     "write": {"targets"}, "highlight": {"targets"}, "fade": {"targets"},
     "transform": {"targets", "to"}, "camera_move": {"zoom", "focus_x", "focus_y"},
@@ -201,8 +203,8 @@ def _fingerprint(scene: Scene) -> str:
 def _measure(project: Project, scene: Scene) -> dict[str, Any] | None:
     """Probe the scene (exact geometry) when Manim is available, else None."""
     probe = rnd.probe_scene(project, scene, session.workdir(project.id, scene.id))
-    if probe.get("ok") is None:
-        return None
+    if probe.get("ok") is None and not probe.get("timeout"):
+        return None  # no Manim: estimated geometry
     session.set_last_probe(project.id, scene.id, probe)
     return probe
 
@@ -281,7 +283,9 @@ def add_parameter(name: str, value: float = 0.0, scene_id: str | None = None,
     if isinstance(got, dict):
         return got
     _, scene = got
-    if not _IDENT.match(name) or name in _RESERVED:
+    import keyword
+    if not _IDENT.match(name) or name in _RESERVED or keyword.iskeyword(name) \
+            or keyword.issoftkeyword(name) or name in _SAFE_NAMES:
         return err(f"invalid parameter name {name!r} (an identifier, not one of {sorted(_RESERVED)})")
     from .expr import MATH_NAMES
     if name in MATH_NAMES:
@@ -330,7 +334,8 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
     no spline overshoot on jumps, curves split at poles and clipped to the axes);
     optional overrides: 'smooth': bool, 'dx': step. x_label/y_label are LaTeX.
     Defaults: x_range [-5, 5, 1], y_range [-3, 3, 1]; a [min, max] range gets a
-    readable tick step (about 8 ticks); the result echoes the ranges used. Curves
+    readable tick step (4-8 ticks, starting at min, or at 0 if 0 is inside the range);
+    the result echoes the ranges used. Curves
     without a color get distinct colors suited to the theme. The axes are centred at
     (x, y); labels hang off them. Without functions you get bare axes."""
     got = _require_scene(project_id, scene_id)
@@ -538,7 +543,10 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
              with_previous: bool = False, param: str | None = None, value: float | None = None,
              scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
     """Append a timed beat. kind: write|transform|highlight|fade|camera_move|wait|tween.
-    write/highlight/fade: all targets animate together, over `duration`.
+    write/highlight/fade: all targets animate together, over `duration` (a plot's axes
+    and curves are drawn together; highlight is a brief 1.2x pulse in the theme's
+    accent color). An object driven by a parameter cannot be written, highlighted
+    or faded in the same beat as a tween of that parameter (Manim freezes it).
     transform: one target morphs into `to` (the target keeps its id afterwards).
     camera_move: zoom is absolute (1 = the full frame, 2 = twice as close); focus_x/
     focus_y recentre the camera, omitted = keep the current centre.
@@ -562,6 +570,8 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
     if extra:
         return err(f"{kind} does not take {extra} (it takes {sorted(allowed) or 'only duration'})")
     targets = targets or []
+    if len(set(targets)) != len(targets):
+        return err(f"duplicate targets in {targets}; list each object once")
     defined = {o.id for o in scene.objects}
     unknown = [t for t in targets if t not in defined]
     if unknown:
@@ -597,8 +607,15 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
             return err("with_previous cannot join a wait (a wait is a pause, not an animation)")
     step = scene.add_step(kind, targets=targets, to=to, duration=duration, note=note,
                           with_previous=with_previous, param=param, value=value)
-    return ok({"scene_id": scene.id, "step_index": step.index, "kind": kind,
-               "with_previous": with_previous, "scene_duration": scene.duration()})
+    conflicts = beat_conflicts(scene, only_step=step.index)
+    if conflicts:
+        scene.remove_step(step.index)
+        return err(conflicts[0])
+    res = {"scene_id": scene.id, "step_index": step.index, "kind": kind,
+           "with_previous": with_previous, "scene_duration": scene.duration()}
+    if kind == "tween" and step.index in unused_tweens(scene):
+        res["warning"] = f"no object uses parameter '{param}' yet: this tween changes nothing on screen"
+    return ok(res)
 
 
 # ---------------------------------------------------------------------------
@@ -695,8 +712,14 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     if scale is not None:
         if obj.kind in ("area", "riemann"):
             return err(f"'{object_id}' follows its plot; scale the plot instead")
+        if "x2" in p:
+            return err(f"'{object_id}' is an explicit segment; change its endpoints instead")
         if scale <= 0:
             return err("scale must be > 0")
+    if obj.kind == "riemann":
+        n = (float(p["x_max"]) - float(p["x_min"])) / float(p.get("dx", 0.1))
+        if abs(n - round(n)) > 1e-6:
+            return err(f"(x_max - x_min) / dx = {n:.4g} is not a whole number of rectangles")
     if obj.kind in ("area", "riemann"):
         plot = scene.get_obj(p["plot"])
         if plot is not None and ((e := _interval_error(plot, float(p["x_min"]), float(p["x_max"])))
@@ -867,16 +890,20 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
         return err("max_rounds must be >= 1")
     all_changes: list[dict[str, Any]] = []
     probe = _measure(project, scene)
-    if probe is None:
-        return err("fix_scene needs Manim (measured geometry); estimated findings are not auto-fixed")
+    if probe is None or probe.get("ok") is not True:
+        return err("fix_scene needs measured geometry (Manim, and a probe that completes); "
+                   "estimated findings are not auto-fixed")
     insp = inspect_scene(scene, measurement=probe)
+    attempts: dict[str, int] = {}  # repairs tried per curve, so none is retried in a loop
     for _ in range(max_rounds):
-        changes, _unresolved = apply_fixes(scene, insp["obligations"], probe)
+        changes, _unresolved = apply_fixes(scene, insp["obligations"], probe, attempts)
         if not changes:
             break
         all_changes += changes
         probe = _measure(project, scene)
         insp = inspect_scene(scene, measurement=probe)
+        if probe is None or probe.get("ok") is not True:
+            break
     obls = _register_obligations(project, scene.id, insp["obligations"])
     remaining = [o for o in obls if o["severity"] in ("error", "warning")]
     return ok({"scene_id": scene.id, "changes": all_changes, "needs_author": remaining},

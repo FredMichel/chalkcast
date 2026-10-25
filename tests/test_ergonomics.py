@@ -78,7 +78,7 @@ def test_with_previous_and_multi_target_semantics(scene):
     srv.add_step("highlight", targets=[a], with_previous=True)
     code = generate_module(scene, "chalkboard")
     assert "self.play(Write(text_1, run_time=2), Write(text_2, run_time=2))" in code
-    assert "self.play(Write(text_3, run_time=1.0), Indicate(text_1, run_time=1.0))" in code
+    assert "self.play(Write(text_3, run_time=1.0), Indicate(text_1, color='#f6c76b', run_time=1.0))" in code
 
 
 def test_remove_step_reports_regrouping(scene):
@@ -354,3 +354,104 @@ def test_closing_falls_back_to_another_open_project():
     srv.open_project()
     assert srv.close_project()["result"]["current_project"] == first
     assert srv.add_scene()["ok"]
+
+
+# ---- third audit ----------------------------------------------------------------
+
+# B1. a shape's scale was stored but never rendered
+def test_shape_scale_is_rendered(scene):
+    s = _id(srv.add_shape("circle", size=1))
+    srv.update_object(s, scale=3)
+    assert "Circle(radius=0.5, color='#f4f1e8').scale(3)" in generate_module(scene, "chalkboard") \
+        or ".scale(3)" in generate_module(scene, "chalkboard").split(f"{s} = ")[1].split("\n")[0]
+
+
+# B2. segments are placed by their endpoints: no silent scale/position fix
+def test_segment_cannot_be_scaled(scene):
+    s = _id(srv.add_shape("line", x1=-9, y1=0, x2=9, y2=1))
+    assert "endpoints" in srv.update_object(s, scale=0.5)["error"]
+
+
+# B3. update_object skipped the whole-number check of add_riemann
+def test_update_riemann_keeps_whole_rectangles(scene):
+    p = _id(srv.add_plot(functions=["x**2/4"], x_range=[0, 3], y_range=[0, 3]))
+    r = _id(srv.add_riemann(p, 0, 2, dx=0.5))
+    assert "whole number" in srv.update_object(r, dx=0.3)["error"]
+    assert "whole number" in srv.update_object(r, x_max=1.9)["error"]
+
+
+# B4. a Python keyword as a parameter name broke every plot
+@pytest.mark.parametrize("name", ["lambda", "None", "for", "match", "sum"])
+def test_keyword_parameter_names_rejected(scene, name):
+    assert srv.add_parameter(name, 1.0)["ok"] is False
+
+
+# B5. animating a parameter-driven object during a tween froze it, then it jumped
+def test_animating_a_driven_object_during_its_tween_rejected(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["sin(x - t)"]))
+    srv.add_step("write", targets=[p], duration=3)
+    srv.add_step("highlight", targets=[p], duration=2)
+    r = srv.add_step("tween", param="t", value=3.14, duration=2, with_previous=True)
+    assert r["ok"] is False and "freeze" in r["error"]
+    assert len(scene.steps) == 2  # nothing half-added
+
+
+# B7/B9. a plot's curve was drawn only at the end; highlight ignored the theme
+def test_plot_drawn_at_once_and_highlight_uses_accent():
+    srv.open_project(theme="whiteboard")
+    srv.add_scene()
+    sc = session.get_project().get_scene(None)
+    p = _id(srv.add_plot(functions=["sin(x)"]))
+    srv.add_step("write", targets=[p], duration=3)
+    srv.add_step("highlight", targets=[p])
+    code = generate_module(sc, "whiteboard")
+    assert "Create(plot_1, run_time=3, lag_ratio=0)" in code
+    assert "Indicate(plot_1, color='#2a6df5'" in code
+
+
+# B8. fix_scene's fidelity repair flip-flopped forever
+def test_fidelity_repair_does_not_loop(scene):
+    from chalkcast.fix import apply_fixes
+    p = _id(srv.add_plot(functions=["sin(1000*x)"]))
+    obl = [{"lane": "fidelity", "severity": "error", "target": p, "fn": 1, "summary": "x"}]
+    attempts: dict = {}
+    seen = []
+    for _ in range(4):
+        changes, _ = apply_fixes(scene, obl, None, attempts)
+        seen.append(len(changes))
+    assert seen[:1] == [1] and seen[2:] == [0, 0]
+
+
+# B10. a zoomed-out camera shrinks text below legibility
+def test_legibility_accounts_for_zoom(scene):
+    t = _id(srv.add_text("small print", font_size=24))
+    srv.add_step("camera_move", zoom=0.4)
+    srv.add_step("write", targets=[t])
+    assert any(o["lane"] == "legibility" for o in _lanes(scene, "warning"))
+
+
+# B11. a tween of a parameter nothing uses
+def test_unused_tween_is_reported(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["sin(x)"]))
+    srv.add_step("write", targets=[p])
+    r = srv.add_step("tween", param="t", value=5)
+    assert "changes nothing" in r["result"]["warning"]
+    assert any("no object uses" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# B13. a probe timeout is not a compile error and does not block rendering
+def test_probe_timeout_is_a_measure_warning(scene):
+    t = _id(srv.add_text("A"))
+    srv.add_step("write", targets=[t])
+    insp = inspect_scene(scene, measurement={"ok": None, "timeout": True,
+                                             "error": "geometry probe timed out after 120s"})
+    lanes = {(o["lane"], o["severity"]) for o in insp["obligations"]}
+    assert ("measure", "warning") in lanes and not any(l == "compile" for l, _ in lanes)
+
+
+# B14. duplicate targets were accepted
+def test_duplicate_targets_rejected(scene):
+    t = _id(srv.add_text("A"))
+    assert "duplicate" in srv.add_step("write", targets=[t, t])["error"]

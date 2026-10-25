@@ -178,7 +178,8 @@ def _fn_def(name: str, expr: str, params: dict[str, float]) -> list[str]:
     """A named function of x that reads the current scene-parameter values."""
     lines = [f"def {name}(x):"]
     for p in params:
-        lines.append(f"    {p} = P[{p!r}].get_value()")
+        if uses_params(expr, {p: 0.0}):
+            lines.append(f"    {p} = P[{p!r}].get_value()")
     lines.append(f"    return {expr}")
     return lines
 
@@ -269,6 +270,7 @@ def _define_shape(obj: Obj, ink: str, scene: Scene) -> list[str]:
     else:
         body = f"Circle(radius={size / 2}, color={col})"
 
+    body += _scale(obj)
     anchor = p.get("anchor")
     if not anchor:
         return [f"{var} = {body}{_pos(obj)}"]
@@ -333,22 +335,29 @@ def _define_plot(obj: Obj, ink: str, scene: Scene) -> list[str]:
 
 def _introduce_anim(obj: Obj | None) -> str:
     """Pick a natural 'appear' animation for a target object."""
-    if obj is not None and obj.kind in ("shape", "plot", "area", "riemann"):
+    if obj is not None and obj.kind == "plot":
+        return "Create"  # with lag_ratio=0 below: axes and curves drawn together
+    if obj is not None and obj.kind in ("shape", "area", "riemann"):
         return "Create"
     return "Write"
 
 
-def _step_anims(scene: Scene, step: Step) -> list[str]:
+def _step_anims(scene: Scene, step: Step, accent: str = "#f6c76b") -> list[str]:
     """The animation expressions of one step (each carries its own run_time)."""
     dur = step.duration
     if step.kind == "write":
-        return [f"{_introduce_anim(scene.get_obj(t))}({t}, run_time={dur})" for t in step.targets]
+        out = []
+        for t in step.targets:
+            o = scene.get_obj(t)
+            lag = ", lag_ratio=0" if o is not None and o.kind == "plot" else ""
+            out.append(f"{_introduce_anim(o)}({t}, run_time={dur}{lag})")
+        return out
     if step.kind == "transform":
         if step.targets and step.to:
             return [f"Transform({step.targets[0]}, {step.to}, run_time={dur})"]
         return []
     if step.kind == "highlight":
-        return [f"Indicate({t}, run_time={dur})" for t in step.targets]
+        return [f"Indicate({t}, color={accent!r}, run_time={dur})" for t in step.targets]
     if step.kind == "fade":
         return [f"FadeOut({t}, run_time={dur})" for t in step.targets]
     if step.kind == "camera_move":
@@ -367,7 +376,7 @@ def _step_anims(scene: Scene, step: Step) -> list[str]:
     return []
 
 
-def _step_lines(scene: Scene) -> list[str]:
+def _step_lines(scene: Scene, accent: str = "#f6c76b") -> list[str]:
     # Each group becomes one self.play(...): a step's targets animate together, and a
     # with_previous step joins the previous step's play.
     groups: list[list[str] | float] = []
@@ -375,7 +384,7 @@ def _step_lines(scene: Scene) -> list[str]:
         if step.kind == "wait":
             groups.append(float(step.duration))
             continue
-        anims = _step_anims(scene, step)
+        anims = _step_anims(scene, step, accent)
         if not anims:
             continue
         if step.with_previous and groups and isinstance(groups[-1], list):
@@ -402,7 +411,7 @@ def build_function_code(scene: Scene, theme_name: str) -> str:
 def generate_scene_code(scene: Scene, theme_name: str) -> str:
     body = ["ns = _cc_build()", "P = ns['P']"]
     body += [f"{o.id} = ns[{o.id!r}]" for o in scene.objects]
-    body += _step_lines(scene)
+    body += _step_lines(scene, theme(theme_name)["accent"])
     indented = "\n".join("        " + line for line in body)
     return (
         f"class {scene.class_name()}(MovingCameraScene):\n"
