@@ -8,7 +8,7 @@ THEMES: dict[str, dict[str, str]] = {
     "chalkboard": {
         "background_color": "#17241d",  # dark slate-green board
         "ink": "#f4f1e8",              # chalk white
-        "accent": "#f6c76b",           # chalk yellow
+        "accent": "#ff7eb6",           # chalk pink: unlike every default curve colour
     },
     "whiteboard": {
         "background_color": "#f7f7f4",

@@ -390,7 +390,7 @@ def _introduce_anim(obj: Obj | None) -> str:
     return "Write"
 
 
-def _step_anims(scene: Scene, step: Step, accent: str = "#f6c76b") -> list[str]:
+def _step_anims(scene: Scene, step: Step, accent: str = "#ff7eb6") -> list[str]:
     """The animation expressions of one step (each carries its own run_time)."""
     dur = step.duration
     if step.kind == "write":
@@ -427,7 +427,7 @@ def _step_anims(scene: Scene, step: Step, accent: str = "#f6c76b") -> list[str]:
 END_HOLD = 0.5  # seconds the final state is held when the last step is an animation
 
 
-def _step_lines(scene: Scene, accent: str = "#f6c76b") -> list[str]:
+def _step_lines(scene: Scene, accent: str = "#ff7eb6") -> list[str]:
     # Each group becomes one self.play(...): a step's targets animate together, and a
     # with_previous step joins the previous step's play.
     groups: list[list[str] | float] = []

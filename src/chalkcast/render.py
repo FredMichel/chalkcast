@@ -250,6 +250,10 @@ def export_gif(video: Path, workdir: Path, width: int = 640, fps: int = 15) -> d
     if not video or not Path(video).exists():
         return {"ok": False, "error": "no rendered video to export; render the scene first"}
     out = workdir / (Path(video).stem + ".gif")
+    n = 1
+    while out.exists():  # an earlier export's path was handed out: keep that file
+        n += 1
+        out = workdir / f"{Path(video).stem}-{n}.gif"
     palette = workdir / "_palette.png"
     subprocess.run(
         [ffmpeg_exe(), "-y", "-i", str(video), "-vf", f"fps={fps},scale={width}:-1:flags=lanczos,palettegen", str(palette)],

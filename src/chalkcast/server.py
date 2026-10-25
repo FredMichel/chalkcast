@@ -107,10 +107,17 @@ def _range_error(r: list[float] | None, name: str) -> str | None:
     return None
 
 
+MIN_DURATION = 0.2   # seconds: 3 frames at 15 fps
+MAX_DURATION = 60.0  # seconds: longer is almost always a milliseconds mix-up
+
+
 def _tex_specials(tex: str) -> str | None:
     """LaTeX special characters that silently break an equation: % starts a comment
     (the rest of the line vanishes), # is a macro parameter."""
     import re as _re
+    if re.search(r"(?<!\\)\$", tex):
+        return ("unescaped '$' in LaTeX: it is already math mode; write \\$ for a dollar "
+                "sign and \\text{...} for words")
     for ch, name in (("%", "a percent sign"), ("#", "a hash sign")):
         if re.search(r"(?<!\\)" + _re.escape(ch), tex):
             return (f"unescaped '{ch}' in LaTeX: write \\{ch} for {name} ('{ch}' alone "
@@ -138,8 +145,6 @@ def _label_error(label: str) -> str | None:
     if re.search(r"[A-Za-z]{2,}\s+[A-Za-z(]", bare):
         return (f"axis label {label!r} is LaTeX math, where spaces between words vanish; "
                 f"write it as \\text{{{label}}}")
-    if re.search(r"(?<!\\)\$", label):
-        return "unescaped '$' in an axis label: it is already math; write \\$ for a dollar sign"
     return None
 
 
@@ -598,15 +603,22 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
     tween: animate scene parameter `param` to `value` continuously (linear in time).
     with_previous=true plays this step at the same time as the previous one (e.g. move
     a curve and a dot together); not after a wait. `note` is a label for you (not
-    drawn). Arguments that do not apply to `kind` are rejected."""
+    drawn). duration is in seconds, 0.2 to 60. highlight pulses its targets to 1.2x
+    for a moment (leave room around them). Arguments that do not apply to `kind`
+    are rejected."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
     _, scene = got
     if kind not in STEP_KINDS:
         return err(f"unknown step kind {kind!r}; use one of {', '.join(STEP_KINDS)}")
-    if duration <= 0:
-        return err("duration must be > 0")
+    if duration < MIN_DURATION:
+        return err(f"duration {duration} s is too short to see (under {MIN_DURATION} s an "
+                   "animation is 1-2 frames, rounded up unpredictably); use at least "
+                   f"{MIN_DURATION}")
+    if duration > MAX_DURATION:
+        return err(f"duration {duration} s is over {MAX_DURATION} s: durations are seconds, "
+                   "not milliseconds; split a long beat into several steps")
     given = {"targets": bool(targets), "to": to is not None, "zoom": zoom is not None,
              "focus_x": focus_x is not None, "focus_y": focus_y is not None,
              "param": param is not None, "value": value is not None}
@@ -982,7 +994,8 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
 @mcp.tool()
 def render_scene(scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
     """Render one scene to video + sampled frames, then run verification lanes.
-    The scene is measured first; if it cannot compile, no render is attempted."""
+    The scene is measured first; if it cannot compile, no render is attempted.
+    A re-render replaces the scene's previous video (export a GIF to keep one)."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -1050,7 +1063,8 @@ def export_gif(width: int = 640, fps: int = 15, scene_id: str | None = None,
                project_id: str | None = None) -> dict[str, Any]:
     """Export the latest render of a scene as a shareable GIF, resampled to `width`
     pixels wide at `fps` (defaults keep GIFs small). Blocked by open error
-    obligations of that render and by edits made since it."""
+    obligations of that render and by edits made since it. Each export is a new
+    file (name-2.gif, ...): a path returned earlier keeps its content."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -1100,6 +1114,46 @@ def run() -> None:
 
 
 
+def _scene_hint(res: dict[str, Any], kw: dict[str, Any]) -> dict[str, Any]:
+    """Ids and parameters restart in every scene: when a refusal names something
+    that the searched scene lacks but another scene has, say so."""
+    project = session.get_project(kw.get("project_id"))
+    if project is None or len(project.scenes) < 2 or "pass scene_id" in res.get("error", ""):
+        return res
+    scene = project.get_scene(kw.get("scene_id"))
+    if scene is None:
+        return res
+    found = []
+    for name in dict.fromkeys(re.findall(r"'([A-Za-z_][A-Za-z0-9_]*)'", res.get("error", ""))):
+        if scene.get_obj(name) is not None or name in scene.params:
+            continue
+        where = [sc.id for sc in project.scenes if sc is not scene
+                 and (sc.get_obj(name) is not None or name in sc.params)]
+        if where:
+            found.append(f"'{name}' is in {', '.join(where)}")
+    if found:
+        res = {**res, "error": res["error"] + f" (searched {scene.id}; {'; '.join(found)}: "
+               "pass scene_id)"}
+    return res
+
+
+def _hint_wrong_scene() -> None:
+    """Every tool, called from Python or over MCP, gets the wrong-scene hint."""
+    import functools
+
+    for tool in mcp._tool_manager._tools.values():
+        def make(fn: Any) -> Any:
+            @functools.wraps(fn)
+            def wrapped(*a: Any, **kw: Any) -> Any:
+                res = fn(*a, **kw)
+                if isinstance(res, dict) and res.get("ok") is False:
+                    res = _scene_hint(res, kw)
+                return res
+            return wrapped
+        tool.fn = make(tool.fn)
+        globals()[tool.fn.__name__] = tool.fn
+
+
 def _flag_errors_over_mcp() -> None:
     """A refused call ({"ok": false, ...}) is an error on the wire too: MCP clients
     see is_error=true with the same JSON envelope. Python callers of the tool
@@ -1134,6 +1188,7 @@ def _forbid_unknown_arguments() -> None:
 
 
 _forbid_unknown_arguments()
+_hint_wrong_scene()
 _flag_errors_over_mcp()
 
 if __name__ == "__main__":

@@ -124,6 +124,9 @@ class Geometry:
         """Every position a moving curve/shape takes during the tweens (measured)."""
         return [p for st in self._states for p in st.get("ink", {}).get(oid, [])]
 
+    def label_boxes(self, plot_id: str) -> list[BBox]:
+        return [b for b in (self._box(x) for x in self._plots.get(plot_id, {}).get("label_boxes", [])) if b]
+
     def axes_points(self, plot_id: str) -> list[list[float]]:
         """The axes' own ink (lines, ticks, labels): it does not move with parameters."""
         return list(self._plots.get(plot_id, {}).get("axes_points", []))
@@ -832,6 +835,31 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                                     f"of step {start} (measured)",
                                     "move the label out of the path, or limit the tween's range",
                                     target=tid, other=mover, step=start))
+    # a plot's own axis labels: a wide label is pushed back on screen, over the
+    # axis tip, where its own curve (or a dot on it) can strike through it. Strict
+    # overlap: the curve ending 0.1 units before the label is Manim's normal layout.
+    for obj in scene.objects:
+        if obj.kind != "plot" or not geo.measured:
+            continue
+        lbs = geo.label_boxes(obj.id)
+        if not lbs:
+            continue
+        pts = [p for c in geo.curves(obj.id) for p in c.get("points", [])] + geo.moving_points(obj.id)
+        if any(_inside(p, lb, shrink=0.0) for lb in lbs for p in pts):
+            out.append(_obl(scene.id, "collision", "error",
+                            f"a curve of '{obj.id}' runs through its own axis label (measured)",
+                            "shorten the label, widen the plot, or change y_range so the curve "
+                            "clears the axis end", target=obj.id))
+        for sh in scene.objects:
+            if sh.kind != "shape" or (sh.payload.get("anchor") or {}).get("plot") != obj.id:
+                continue
+            boxes = [geo._box(st["objects"][sh.id]) for st in geo.states if sh.id in st["objects"]]
+            boxes = [b for b in boxes + [geo.bbox(sh.id)] if b]
+            if any(b.overlap_area(lb) > 0.01 * min(b.area, lb.area) for b in boxes for lb in lbs):
+                out.append(_obl(scene.id, "collision", "warning",
+                                f"'{sh.id}' covers an axis label of '{obj.id}' (measured)",
+                                "move the anchor away from the axis end, or drop the label",
+                                target=sh.id, other=obj.id))
     # between two samples a moving shape sweeps a segment: a small label can sit
     # between them (samples land ~1 unit apart on a fast tween)
     by_beat: dict[int, list[dict[str, Any]]] = {}

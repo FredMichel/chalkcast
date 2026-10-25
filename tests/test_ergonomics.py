@@ -78,7 +78,7 @@ def test_with_previous_and_multi_target_semantics(scene):
     srv.add_step("highlight", targets=[a], with_previous=True)
     code = generate_module(scene, "chalkboard")
     assert "self.play(Write(text_1, run_time=2), Write(text_2, run_time=2))" in code
-    assert "self.play(Write(text_3, run_time=1.0), Indicate(text_1, color='#f6c76b', run_time=1.0))" in code
+    assert "self.play(Write(text_3, run_time=1.0), Indicate(text_1, color='#ff7eb6', run_time=1.0))" in code
 
 
 def test_remove_step_reports_regrouping(scene):
@@ -1312,3 +1312,65 @@ def test_unknown_object_names_its_scene(scene):
     r = srv.update_object(t, x=1)
     assert r["ok"] is False and "scene:0001" in r["error"] and "scene_id" in r["error"]
 
+
+
+# ---- fifteenth audit --------------------------------------------------------------
+
+# P1. a wide axis label pushed over the axis tip, struck through by its own curve
+def test_curve_strikes_its_own_wide_label(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "x - x**2/10"}], x_range=[0, 10], y_range=[0, 3],
+                         width=10, height=3.5, x_label="\\text{distance (m)}"))
+    srv.add_step("write", targets=[p])
+    r = _measured(scene)
+    assert any("own axis label" in o["summary"] for o in r["obligations"] if o["severity"] == "error")
+
+
+# P2. a refusal naming something another scene has says where it is
+def test_wrong_scene_hint_everywhere(scene):
+    p = _id(srv.add_plot(functions=["x"]))
+    srv.add_parameter("t", 0)
+    srv.add_scene("second")
+    for r in (srv.add_area(plot_id=p),
+              srv.add_shape("dot", plot_id=p, at_x="1", at_y="1"),
+              srv.add_step("write", targets=[p]),
+              srv.add_plot(functions=["sin(x - t)"]),
+              srv.add_step("tween", param="t", value=1)):
+        assert r["ok"] is False and "scene:0001" in r["error"] and "pass scene_id" in r["error"], r
+
+
+# P3. an exported GIF is never overwritten by a later export
+def test_export_does_not_overwrite(tmp_path):
+    pytest.importorskip("manim")
+    from chalkcast import render
+    if not render.have_ffmpeg():
+        pytest.skip("no ffmpeg")
+    import subprocess
+    vid = tmp_path / "v.mp4"
+    subprocess.run([render.ffmpeg_exe(), "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.3",
+                    str(vid)], capture_output=True)
+    a = render.export_gif(vid, tmp_path)["artifact"]
+    b = render.export_gif(vid, tmp_path, width=32)["artifact"]
+    assert a != b and (tmp_path / "v.gif").exists()
+
+
+# P4/P5. durations are seconds between 0.2 and 60
+def test_duration_bounds(scene):
+    t = _id(srv.add_text("A"))
+    assert srv.add_step("write", targets=[t], duration=0.05)["ok"] is False
+    r = srv.add_step("write", targets=[t], duration=1500)
+    assert r["ok"] is False and "milliseconds" in r["error"]
+    assert srv.add_step("write", targets=[t], duration=0.2)["ok"]
+
+
+# P6. the default highlight colour is not a default curve colour
+def test_highlight_differs_from_curves():
+    from chalkcast.codegen import CURVE_COLORS
+    from chalkcast.themes import theme
+    assert theme("chalkboard")["accent"] not in CURVE_COLORS
+
+
+# P7. '$' in an equation is refused with the reason
+def test_dollar_in_equation(scene):
+    r = srv.add_equation("$x^2$ is the area")
+    assert r["ok"] is False and "already math" in r["error"]
+    assert srv.add_equation("\\$5")["ok"]

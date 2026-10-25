@@ -265,7 +265,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
                 curves.append(fid)
             # axis labels are ink a note must not sit on, like the axes themselves
             labels = ns.get(f"{oid}_labels")
-            plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves,
+            label_boxes = [b for b in (_bbox(lab) for lab in (labels or [])) if b]
+            plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves, "label_boxes": label_boxes,
                           # an axis line is one cubic segment: sample it every few hundredths
                           "axes_points": _path_samples(ax, per_leaf=400) +
                           (_path_samples(labels) if labels else [])}
