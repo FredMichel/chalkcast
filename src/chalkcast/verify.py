@@ -131,6 +131,11 @@ class Geometry:
     def glyph_pt(self, oid: str) -> float | None:
         return self._objs.get(oid, {}).get("glyph_pt")
 
+    def named_label_boxes(self, plot_id: str) -> list[tuple[str, BBox]]:
+        rec = self._plots.get(plot_id, {})
+        names = rec.get("label_names") or ["x_label", "y_label"]
+        return [(n, b) for n, raw in zip(names, rec.get("label_boxes", [])) if (b := self._box(raw))]
+
     def label_boxes(self, plot_id: str) -> list[BBox]:
         return [b for b in (self._box(x) for x in self._plots.get(plot_id, {}).get("label_boxes", [])) if b]
 
@@ -817,14 +822,21 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         txt, other = (a, b) if ka in TEXTLIKE else (b, a)
         tbox = geo.bbox(txt.id)
         if other.kind == "plot" and tbox:
-            # printed over the plot's own axis label: two texts on top of each other
-            axes = geo.axes_box(other.id)
-            for lb in geo.label_boxes(other.id):
-                ov = lb.overlap_area(tbox)
-                if ov > 0 and ov / min(lb.area, tbox.area) >= 0.15:
-                    which = "y_label" if axes and lb.cy > axes.top - 0.05 else "x_label"
+            # the plot's own texts: axis labels and tick numbers
+            marks = geo.named_label_boxes(other.id) + [("tick number", b) for b in geo.number_boxes(other.id)]
+            for which, lb in marks:
+                w = min(tbox.right, lb.right) - max(tbox.left, lb.left)
+                h = min(tbox.top, lb.top) - max(tbox.bottom, lb.bottom)
+                if w > 0.02 and h > 0.02:  # glyph boxes really intersect
                     return ("error", f"'{txt.id}' is printed over the {which} of '{other.id}' "
-                                     f"(~{ov / min(lb.area, tbox.area) * 100:.0f}% of the smaller, measured)")
+                                     f"({w:.2f} x {h:.2f} units, measured)")
+            for which, lb in marks:
+                w = min(tbox.right, lb.right) - max(tbox.left, lb.left)
+                h = min(tbox.top, lb.top) - max(tbox.bottom, lb.bottom)
+                if -0.1 < w <= 0.02 and h > 0.5 * min(tbox.height, lb.height):
+                    return ("warning", f"'{txt.id}' touches the {which} of '{other.id}' on the "
+                                       f"same line ({max(0.0, -w):.2f} units apart, measured): they "
+                                       "read as one", )
         if static_only and other.kind != "plot":
             return None
         pts = (geo.axes_points(other.id) if static_only else geo.curve_points(other.id)) \
@@ -938,21 +950,25 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             "curve (e.g. include 0), or drop show_numbers", target=obj.id))
         static = [p for c in geo.curves(obj.id) for p in c.get("points", [])]
         axes = geo.axes_box(obj.id)
-        for lb in lbs:
-            which = "y_label" if axes and lb.cy > axes.top - 0.05 else "x_label"
+        for which, lb in geo.named_label_boxes(obj.id):
+            pushed = axes is not None and (lb.left < axes.right - 0.05 if which == "x_label"
+                                           else lb.bottom < axes.top - 0.05)
+            cure = ("the plot is too wide/tall for its label, which Manim pushed back over the "
+                    "axis tip: reduce width/height (or the scale) or shorten the label"
+                    if pushed else None)
             if any(_inside(p, lb, shrink=0.0) for p in static) and not is_dynamic(obj, scene):
                 out.append(_obl(scene.id, "collision", "error",
                                 f"a curve of '{obj.id}' runs through its own {which} (measured)",
-                                "change y_range/x_range so the curve clears the axis end, widen "
-                                "the plot, or shorten the label", target=obj.id))
+                                cure or "change y_range/x_range so the curve clears the axis end, "
+                                "or shorten the label", target=obj.id))
             elif any(_inside(p, lb, shrink=0.0) for p in pts):
                 tw = [st.index for st in scene.steps if st.kind == "tween"
                       and st.param in obj_params(obj, scene)]
                 out.append(_obl(scene.id, "collision", "error",
                                 f"a curve of '{obj.id}' runs through its own {which} during or "
                                 f"after the tween(s) at step(s) {tw} (measured)",
-                                "limit the tween's range, or widen y_range/x_range so the moving "
-                                "curve clears the axis end", target=obj.id,
+                                cure or "limit the tween's range, or widen y_range/x_range so "
+                                "the moving curve clears the axis end", target=obj.id,
                                 step=tw[0] if tw else None))
         for sh in scene.objects:
             if sh.kind != "shape" or (sh.payload.get("anchor") or {}).get("plot") != obj.id:
@@ -1195,6 +1211,10 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
 def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
     out = []
     defined = {o.id for o in scene.objects}
+    if not scene.objects:
+        out.append(_obl(scene.id, "timing", "error", "the scene is empty: the video is blank",
+                        "add objects (add_text, add_plot, ...) and write steps for them"))
+        return out
     if scene.objects and not scene.steps:
         out.append(_obl(scene.id, "timing", "error",
                         "the scene has objects but no steps, so nothing will be shown",
@@ -1313,7 +1333,7 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
             used.update(st.targets)
             if st.to:
                 used.add(st.to)
-        if scene.objects and not used:
+        if not used:
             out.append(_obl(scene.id, "timing", "error",
                             "no step shows anything (only waits, tweens or camera moves): the "
                             "video is blank", "add write steps for the objects to display"))

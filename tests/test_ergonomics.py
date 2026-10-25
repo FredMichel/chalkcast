@@ -1732,3 +1732,83 @@ def test_left_behind_note_uses_endpoints(scene):
     assert any(ln in n for n in r["limitations"])
     r = srv.update_object(p, show_numbers=True)
     assert not any("did not move" in n for n in r["limitations"])
+
+
+# ---- twenty-first audit -----------------------------------------------------------
+
+# V1. fix_scene scaling a plot keeps hand-placed dots on their data point
+def test_fix_scales_hand_placed_with_plot(scene):
+    r = srv.add_plot(functions=[{"expr": "0.25*x**2"}], x_range=[-8, 8], y_range=[0, 16],
+                     width=16, height=6)
+    p = _id(r)
+    d = _id(srv.add_shape("dot", x=6.0, y=0.375))  # data (6, 9)
+    srv.add_step("write", targets=[p, d])
+    pytest.importorskip("manim")
+    srv.fix_scene()
+    m = srv.inspect_project()["result"]  # noqa: F841
+    plot = scene.get_obj(p)
+    f = plot.scale
+    want = (plot.position[0] + 6.0 * f, plot.position[1] + 0.375 * f)
+    assert f < 1 and scene.get_obj(d).position == pytest.approx(want, abs=2e-3)
+
+
+# V2/V3. text over a tick number or slightly into an axis label is an error
+def test_text_over_tick_number(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "2+0.1*x"}], x_range=[-5, 5], y_range=[-1, 3], width=8,
+                         height=4, show_numbers=True, x_label="x", y_label="y"))
+    t = _id(srv.add_text("note", x=-1.6, y=-1.33, font_size=28))
+    srv.add_step("write", targets=[p, t])
+    r = _measured(scene)
+    assert any("tick number" in o["summary"] and o["severity"] == "error" for o in r["obligations"])
+
+
+def test_title_descender_into_axis_label(scene):
+    p = _id(srv.add_plot(functions=["sin(x)"], x_range=[-5, 5], y_range=[-2, 2], width=8, height=4,
+                         y=-0.5, x_label="x", y_label="y"))
+    t = _id(srv.add_text("The sine wave", x=0.6, y=2.0, font_size=36))
+    srv.add_step("write", targets=[p, t])
+    r = _measured(scene)
+    assert any("y_label" in o["summary"] and o["severity"] in ("error", "warning")
+               and ("printed over" in o["summary"] or "touches" in o["summary"])
+               for o in r["obligations"])
+
+
+# V5. a label pushed over the axis tip by a too-wide plot says so
+def test_pushed_label_names_the_width(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["sin(x - t)", "sin(x + t)", "sin(x-t)+sin(x+t)"], x_range=[-7, 7],
+                         y_range=[-2, 2], width=14, height=4, x_label="x"))
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="t", value=3)
+    r = _measured(scene)
+    hit = [o for o in r["obligations"] if "own x_label" in o["summary"]]
+    assert hit and "too wide" in hit[0]["suggested_fix"]
+
+
+# V6. an empty scene is an error
+def test_empty_scene_is_an_error(scene):
+    assert any("empty" in o["summary"] for o in _lanes(scene))
+    srv.add_step("wait", duration=1)
+    assert any("blank" in o["summary"] for o in _lanes(scene))
+
+
+# V7. the label is named by what it is, not where it sits
+def test_label_named_with_negative_range(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "-x**2/4"}], x_range=[-4, 4], y_range=[-4, 0],
+                         x_label="x", y_label="y"))
+    t = _id(srv.add_text("label", x=4.4, y=2.85))  # on the x_label, which sits at the top here
+    srv.add_step("write", targets=[p, t])
+    r = _measured(scene)
+    hit = [o for o in r["obligations"] if "printed over" in o["summary"]]
+    assert hit and "x_label" in hit[0]["summary"]
+
+
+# V8. a title written before the plot is not dragged along by fix_scene
+def test_fix_leaves_earlier_title(scene):
+    t = _id(srv.add_text("Title", x=0, y=2.6))
+    p = _id(srv.add_plot(functions=["x"], width=12, height=6, x=1.2))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[p])
+    pytest.importorskip("manim")
+    r = srv.fix_scene()["result"]
+    assert not any(c["object"] == t and "moved with it" in c["reason"] for c in r["changes"])

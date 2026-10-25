@@ -302,9 +302,10 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
             # axis labels are ink a note must not sit on, like the axes themselves
             labels = ns.get(f"{oid}_labels")
             label_boxes = [b for b in (_bbox(lab) for lab in (labels or [])) if b]
+            label_names = [n for n, lab in zip(("x_label", "y_label"), labels or []) if _bbox(lab)]
             number_boxes = [b for axis in ax.get_axes() for num in getattr(axis, "numbers", [])
                             if (b := _bbox(num))]
-            plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves, "label_boxes": label_boxes,
+            plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves, "label_boxes": label_boxes, "label_names": label_names,
                           "number_boxes": number_boxes,
                           # an axis line is one cubic segment: sample it every few hundredths
                           "axes_points": _path_samples(ax, per_leaf=400) +

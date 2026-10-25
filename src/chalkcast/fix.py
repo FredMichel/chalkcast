@@ -64,6 +64,7 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
             continue
         if o.kind == "plot":
             pts += geo.curve_points(g) + geo.moving_points(g)
+            boxes += [lb for _, lb in geo.named_label_boxes(g)] + geo.number_boxes(g)
         elif o.kind == "shape":
             pts += geo.ink(g) + geo.moving_points(g)
         elif o.kind in TEXTLIKE:
@@ -177,8 +178,18 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 unresolved.append(o)
                 continue
             x, y = obj.position
+            f = new_scale / obj.scale if obj.scale else 1.0
             obj.position = (round(x + dx, 3), round(y + dy, 3))
             obj.scale = new_scale
+
+            def follow(px: float, py: float) -> tuple[float, float]:
+                # a point placed in data terms (to_scene) keeps its data coordinates:
+                # the data centre goes to the new position, distances scale by f
+                return (round(x + dx + (px - x) * f, 3), round(y + dy + (py - y) * f, 3))
+            drawn = {}
+            for st in scene.steps:
+                for t in ([*st.targets, st.to] if st.kind == "transform" else st.targets):
+                    drawn.setdefault(t, st.index)
             if obj.kind == "plot":  # overlays follow their plot (kept in the model too)
                 for dep in scene.objects:
                     if dep.payload.get("plot") == obj.id:
@@ -192,8 +203,8 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                     ends = ((pl["x1"], pl["y1"]), (pl["x2"], pl["y2"]))
                     if all(axes.left <= ex <= axes.right and axes.bottom <= ey <= axes.top
                            for ex, ey in ends):
-                        pl.update(x1=round(pl["x1"] + dx, 3), y1=round(pl["y1"] + dy, 3),
-                                  x2=round(pl["x2"] + dx, 3), y2=round(pl["y2"] + dy, 3))
+                        (x1, y1), (x2, y2) = follow(pl["x1"], pl["y1"]), follow(pl["x2"], pl["y2"])
+                        pl.update(x1=x1, y1=y1, x2=x2, y2=y2)
                         touched.add(seg.id)
                         changes.append({"object": seg.id, "lane": lane, "endpoints":
                                         [pl["x1"], pl["y1"], pl["x2"], pl["y2"]],
@@ -204,8 +215,10 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                             or o2.payload.get("anchor") or o2.kind not in ("text", "equation", "shape")):
                         continue
                     px, py = o2.position
+                    if drawn.get(o2.id, 0) < drawn.get(oid, 0):
+                        continue  # written before the plot (a title): not part of it
                     if axes.left <= px <= axes.right and axes.bottom <= py <= axes.top:
-                        o2.position = (round(px + dx, 3), round(py + dy, 3))
+                        o2.position = follow(px, py)
                         touched.add(o2.id)
                         changes.append({"object": o2.id, "lane": lane, "position": list(o2.position),
                                         "reason": f"placed over '{oid}', moved with it"})
