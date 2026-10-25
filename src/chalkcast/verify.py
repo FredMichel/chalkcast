@@ -574,6 +574,30 @@ def _where(view: BBox) -> str:
             f"{view.cx:.3g},{view.cy:.3g})")
 
 
+def _cropped_at_end(scene: Scene, geo: Geometry, oid: str) -> float | None:
+    """Overflow beyond the final camera view, if ``oid`` is on screen at the end
+    under a camera that moved back out to frame size or wider. Ending zoomed in on a
+    detail is a choice; ending at zoom 1 but off-centre is the trap (zoom=1 keeps the
+    current centre, it does not restore the opening view)."""
+    last = scene.steps[-1].index
+    view = camera_by_step(scene)[last][1]
+    if (view == DEFAULT_VIEW or view.width < FRAME_WIDTH - 1e-6
+            or oid not in timeline(scene)[-1].values()):
+        return None
+    if not geo.measured:  # estimated: only a centre outside the final view is certain
+        cx, cy = scene.get_obj(oid).position
+        o = overflow(BBox(cx=cx, cy=cy, width=0.0, height=0.0), view)
+        return o if o > 0 else None
+    box = geo.bbox(oid)
+    ends = [st for st in geo.states if st.get("beat_end")]
+    if ends and oid in ends[-1]["objects"]:
+        box = geo._box(ends[-1]["objects"][oid]) or box
+    if box is None:
+        return None
+    o = overflow(box, view)
+    return o if o > OFFSCREEN_TOLERANCE else None
+
+
 def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     """Each object must be fully inside the camera frame at some moment it is on
     screen: zooming in on a detail may crop others, and a zoom-out may reveal
@@ -605,6 +629,12 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                                 f"object '{oid}' may extend outside the safe area (estimated)",
                                 "nudge it toward the center or reduce its scale if the render "
                                 "confirms it", target=oid))
+            elif scene.steps and (end := _cropped_at_end(scene, geo, oid)) is not None:
+                out.append(_obl(scene.id, "framing", "warning",
+                                f"the scene ends with '{oid}' outside the camera's final view "
+                                "(the last frame, where a GIF loops, does not show it)",
+                                "end with a camera_move that frames it (e.g. zoom=1, focus_x=0, "
+                                "focus_y=0), or fade it before the end", target=oid))
             continue
         if obj.kind == "shape" and geo.undefined(oid, steps):
             out.append(_obl(scene.id, "framing", "error",
@@ -626,6 +656,12 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             "move it toward the center or reduce its scale (fix_scene can do "
                             "this), or move the camera", target=oid, overflow=round(over, 3),
                             view=[best.cx, best.cy, best.width, best.height]))
+        elif scene.steps and (end := _cropped_at_end(scene, geo, oid)) is not None:
+            out.append(_obl(scene.id, "framing", "warning",
+                            f"the scene ends with '{oid}' {end:.2f} units outside the camera's "
+                            "final view (the last frame, where a GIF loops, shows it cropped)",
+                            "end with a camera_move that frames it (e.g. zoom=1, focus_x=0, "
+                            "focus_y=0), or fade it before the end", target=oid))
         elif over > MARGIN_TOLERANCE - view_margin(best):
             # inside the frame but near its edge: worth knowing, not a defect of a GIF
             out.append(_obl(scene.id, "framing", "info",

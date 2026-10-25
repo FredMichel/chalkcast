@@ -219,6 +219,8 @@ class Scene:
             else:
                 total += s.duration
                 group = 0.0 if s.kind == "wait" else s.duration
+        if self.steps and self.steps[-1].kind != "wait":
+            total += 0.5  # codegen.END_HOLD: the final state is held, not cut mid-animation
         return total or 1.0
 
     def to_dict(self) -> dict[str, Any]:

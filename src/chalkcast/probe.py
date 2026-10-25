@@ -190,10 +190,14 @@ def _latex_errors(spec: dict[str, Any]) -> list[str]:
     cache = Path(".texcheck")
     cache.mkdir(exist_ok=True)
     out = []
+    items = []
     for o in spec["objects"]:
-        tex = o.get("tex")
-        if o["kind"] != "equation" or not tex:
-            continue
+        if o["kind"] == "equation" and o.get("tex"):
+            items.append((o["id"], o["tex"]))
+        for k, lab in (o.get("labels") or {}).items():  # axis labels are MathTex too
+            items.append((f"{o['id']} {k}", lab))
+    for oid, tex in items:
+        o = {"id": oid}
         code = config.tex_template.get_texcode_for_expression_in_env(tex, "align*")
         h = hashlib.sha1(code.encode()).hexdigest()[:16]
         ok_marker, err_marker = cache / f"{h}.ok", cache / f"{h}.err"

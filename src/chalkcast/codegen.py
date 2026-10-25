@@ -424,6 +424,9 @@ def _step_anims(scene: Scene, step: Step, accent: str = "#f6c76b") -> list[str]:
     return []
 
 
+END_HOLD = 0.5  # seconds the final state is held when the last step is an animation
+
+
 def _step_lines(scene: Scene, accent: str = "#f6c76b") -> list[str]:
     # Each group becomes one self.play(...): a step's targets animate together, and a
     # with_previous step joins the previous step's play.
@@ -441,6 +444,11 @@ def _step_lines(scene: Scene, accent: str = "#f6c76b") -> list[str]:
             groups.append(list(anims))
     lines = [f"self.wait({g})" if isinstance(g, float) else f"self.play({', '.join(g)})"
              for g in groups]
+    if groups and not isinstance(groups[-1], float):
+        # Manim draws an animation's frames up to (not including) its end state: a
+        # scene ending on a play would never show it (half-written text, a tween
+        # 1/fps short). Hold the final state briefly (Scene.duration counts it).
+        lines.append(f"self.wait({END_HOLD})")
     return lines or ["self.wait(1)"]
 
 

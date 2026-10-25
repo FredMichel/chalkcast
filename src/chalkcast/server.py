@@ -112,10 +112,34 @@ def _tex_specials(tex: str) -> str | None:
     (the rest of the line vanishes), # is a macro parameter."""
     import re as _re
     for ch, name in (("%", "a percent sign"), ("#", "a hash sign")):
-        if _re.search(r"(?<!\\)" + _re.escape(ch), tex):
+        if re.search(r"(?<!\\)" + _re.escape(ch), tex):
             return (f"unescaped '{ch}' in LaTeX: write \\{ch} for {name} ('{ch}' alone "
                     + ("starts a comment that swallows the rest of the line)" if ch == "%"
                        else "is a macro parameter)"))
+    return None
+
+
+def _unknown_object(object_id: str, scene: Scene, project: Project) -> str:
+    """Object ids restart in every scene: point to the scene that has this one."""
+    msg = f"unknown object '{object_id}' in {scene.id}; existing: {sorted(o.id for o in scene.objects)}"
+    elsewhere = [sc.id for sc in project.scenes if sc is not scene
+                 and sc.get_obj(object_id) is not None]
+    if elsewhere:
+        msg += f". '{object_id}' exists in {', '.join(elsewhere)}: pass scene_id"
+    return msg
+
+
+def _label_error(label: str) -> str | None:
+    """Axis labels are MathTex: special characters break them and spaces between
+    words vanish ('time (s)' renders 'time(s)' in italics)."""
+    if (e := _tex_specials(label)):
+        return e
+    bare = re.sub(r"\\(?:text|mathrm|textrm|mbox|operatorname)\{[^{}]*\}", "", label)
+    if re.search(r"[A-Za-z]{2,}\s+[A-Za-z(]", bare):
+        return (f"axis label {label!r} is LaTeX math, where spaces between words vanish; "
+                f"write it as \\text{{{label}}}")
+    if re.search(r"(?<!\\)\$", label):
+        return "unescaped '$' in an axis label: it is already math; write \\$ for a dollar sign"
     return None
 
 
@@ -342,7 +366,8 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
     Expressions use x, bare math functions (sin, exp, sqrt, sign, ...), np.<fn>, and
     declared scene parameters; they are validated now. Sampling is adaptive (dense,
     no spline overshoot on jumps, curves split at poles and clipped to the axes);
-    optional overrides: 'smooth': bool, 'dx': step. x_label/y_label are LaTeX.
+    optional overrides: 'smooth': bool, 'dx': step. x_label/y_label are LaTeX math
+    (spaces vanish: write words as \\text{time (s)}).
     Defaults: x_range [-5, 5, 1], y_range [-3, 3, 1]; a [min, max] range gets a
     readable tick step (4-8 ticks, starting at min, or at 0 if 0 is inside the range);
     the result echoes the ranges used. Curves
@@ -369,6 +394,9 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
         "y_range": _with_ticks(y_range, [-3, 3, 1]),
         "width": width, "height": height,
     }
+    for lab in (x_label, y_label):
+        if lab and (e := _label_error(lab)):
+            return err(e)
     if x_label:
         payload["x_label"] = x_label
     if y_label:
@@ -564,8 +592,9 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
     accent color). An object driven by a parameter cannot be written, highlighted
     or faded in the same beat as a tween of that parameter (Manim freezes it).
     transform: one target morphs into `to` (the target keeps its id afterwards).
-    camera_move: zoom is absolute (1 = the full frame, 2 = twice as close); focus_x/
-    focus_y recentre the camera, omitted = keep the current centre.
+    camera_move: zoom is absolute (1 = frame size, 2 = twice as close); focus_x/
+    focus_y recentre the camera, omitted = keep the current centre -- so after zooming
+    in on a point, return to the original view with zoom=1, focus_x=0, focus_y=0.
     tween: animate scene parameter `param` to `value` continuously (linear in time).
     with_previous=true plays this step at the same time as the previous one (e.g. move
     a curve and a dot together); not after a wait. `note` is a label for you (not
@@ -608,7 +637,7 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
                        "transform; fade one out and write the other instead")
     if kind == "camera_move":
         if not zoom or zoom <= 0:
-            return err("camera_move needs zoom > 0 (absolute: 1 = the full frame)")
+            return err("camera_move needs zoom > 0 (absolute: 1 = frame size)")
         if (focus_x is None) != (focus_y is None):
             return err("give both focus_x and focus_y, or neither (keep the current centre)")
         fx = "" if focus_x is None else focus_x
@@ -669,7 +698,7 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     _, scene = got
     obj = scene.get_obj(object_id)
     if obj is None:
-        return err(f"unknown object '{object_id}'; existing: {sorted(o.id for o in scene.objects)}")
+        return err(_unknown_object(object_id, scene, got[0]))
     if (ce := _color_error(color)):
         return err(ce)
     p = dict(obj.payload)
@@ -695,6 +724,8 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         if field in ("text", "tex") and not str(val).strip():
             return err(f"{field} is empty")
         if field == "tex" and (e := _tex_specials(str(val))):
+            return err(e)
+        if field in ("x_label", "y_label") and val and (e := _label_error(str(val))):
             return err(e)
         if rule == "pos" and val <= 0:
             return err(f"{field} must be > 0")
@@ -812,7 +843,7 @@ def remove_object(object_id: str, cascade: bool = False, scene_id: str | None = 
         return got
     _, scene = got
     if scene.get_obj(object_id) is None:
-        return err(f"unknown object '{object_id}'")
+        return err(_unknown_object(object_id, scene, got[0]))
     to_remove = [object_id]
     i = 0
     while i < len(to_remove):  # transitive dependents
@@ -990,7 +1021,9 @@ def render_scene(scene_id: str | None = None, project_id: str | None = None) -> 
 
 @mcp.tool()
 def render_frame(scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
-    """Fast single-still preview of a scene (last frame)."""
+    """Fast single-still preview of a scene's final state. Not a verification (no
+    lanes run: use inspect_render), and the still shows the end state even where
+    the video would not."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -1001,8 +1034,11 @@ def render_frame(scene_id: str | None = None, project_id: str | None = None) -> 
         return err("preview failed", limitations=[str(report.get("error", "")),
                                                    report.get("stderr_tail", "")],
                    untrusted=["manim_stderr"])
+    notes = ["preview only: not verified (inspect_render runs the checks)"]
+    if not scene.steps:
+        notes.append("the scene has no steps: the still (and a video) shows nothing")
     return ok({"scene_id": scene.id}, frames=report.get("frames", []),
-              timing=report.get("timing", {}))
+              timing=report.get("timing", {}), limitations=notes)
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1100,28 @@ def run() -> None:
 
 
 
+def _flag_errors_over_mcp() -> None:
+    """A refused call ({"ok": false, ...}) is an error on the wire too: MCP clients
+    see is_error=true with the same JSON envelope. Python callers of the tool
+    functions still get the plain dict."""
+    import functools
+    import json as _json
+
+    from mcp.types import CallToolResult, TextContent
+
+    for tool in mcp._tool_manager._tools.values():
+        def make(fn: Any) -> Any:
+            @functools.wraps(fn)
+            def wrapped(*a: Any, **kw: Any) -> Any:
+                res = fn(*a, **kw)
+                if isinstance(res, dict) and res.get("ok") is False:
+                    return CallToolResult(content=[TextContent(type="text", text=_json.dumps(
+                        res, indent=2, default=str))], is_error=True)
+                return res
+            return wrapped
+        tool.fn = make(tool.fn)
+
+
 def _forbid_unknown_arguments() -> None:
     """A misspelled argument (radius= for size=, xrange= for x_range=) must fail
     loudly: by default the tool's argument model drops unknown fields and the call
@@ -1076,6 +1134,7 @@ def _forbid_unknown_arguments() -> None:
 
 
 _forbid_unknown_arguments()
+_flag_errors_over_mcp()
 
 if __name__ == "__main__":
     run()

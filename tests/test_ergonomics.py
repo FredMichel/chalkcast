@@ -1244,3 +1244,71 @@ def test_transform_into_itself_refused(scene):
     c = _id(srv.add_text("c"))
     srv.add_step("write", targets=[c])
     assert srv.add_step("transform", targets=[c], to=c)["ok"] is False
+
+
+# ---- fourteenth audit (over the real MCP protocol) --------------------------------
+
+# N1. a scene ending on an animation holds its final state instead of cutting it
+def test_scene_ending_on_a_play_holds_the_end(scene):
+    t = _id(srv.add_text("END"))
+    srv.add_step("write", targets=[t])
+    assert generate_module(scene, "chalkboard").rstrip().splitlines()[-1].strip() == "self.wait(0.5)"
+    assert scene.duration() == 1.5
+    srv.add_step("wait", duration=1)
+    assert "self.wait(0.5)" not in generate_module(scene, "chalkboard")
+
+
+# N2. zoom=1 keeps the centre: ending zoomed away from an object is flagged
+def test_scene_ending_cropped_by_the_camera(scene):
+    a = _id(srv.add_text("LEFT", x=-5))
+    b = _id(srv.add_text("RIGHT", x=3))
+    srv.add_step("write", targets=[a, b])
+    srv.add_step("camera_move", zoom=2, focus_x=3, focus_y=0)
+    assert not any("final view" in o["summary"] for o in _lanes(scene, "warning"))  # a choice
+    srv.add_step("camera_move", zoom=1)  # back to frame size, but still centred on x=3
+    assert any("final view" in o["summary"] and o["target"] == a for o in _lanes(scene, "warning"))
+    srv.add_step("camera_move", zoom=1, focus_x=0, focus_y=0)
+    assert not any("final view" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# N3/N4. axis labels: LaTeX specials and plain words are refused at add time
+def test_axis_labels_checked(scene):
+    assert srv.add_plot(functions=["x"], x_label="50% load")["ok"] is False
+    r = srv.add_plot(functions=["x"], x_label="time (s)")
+    assert r["ok"] is False and "\\text{time (s)}" in r["error"]
+    p = _id(srv.add_plot(functions=["x"], x_label="\\text{time (s)}", y_label="v_x"))
+    assert srv.update_object(p, y_label="speed of light")["ok"] is False
+
+
+def test_axis_label_latex_errors_are_measured(scene):
+    p = _id(srv.add_plot(functions=["x"], y_label="\\frac{a}"))
+    srv.add_step("write", targets=[p])
+    pytest.importorskip("manim")
+    r = srv.inspect_render()
+    assert any("y_label" in o["summary"] for o in r["obligations"] if o["severity"] == "error")
+
+
+# N5. refused calls are errors on the wire, dicts in Python
+def test_refusals_are_mcp_errors(scene):
+    import asyncio
+    res = asyncio.run(srv.mcp.call_tool("remove_object", {"object_id": "nope"}))
+    res = res if not isinstance(res, tuple) else res[0]
+    assert getattr(res, "is_error", False) is True
+    assert srv.remove_object("nope")["ok"] is False
+
+
+# N6. render_frame says it is a preview, not a verification
+def test_render_frame_is_not_a_verification(scene):
+    pytest.importorskip("manim")
+    r = srv.render_frame()
+    assert any("not verified" in n for n in r["limitations"])
+    assert any("no steps" in n for n in r["limitations"])
+
+
+# N7. an object id from another scene points there
+def test_unknown_object_names_its_scene(scene):
+    t = _id(srv.add_text("A"))
+    srv.add_scene("second")
+    r = srv.update_object(t, x=1)
+    assert r["ok"] is False and "scene:0001" in r["error"] and "scene_id" in r["error"]
+

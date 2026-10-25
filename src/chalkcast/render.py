@@ -83,7 +83,9 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
             dyn = uses_params(str(a.get("x", "")), scene.params) or uses_params(str(a.get("y", "")), scene.params)
         objs.append({"id": o.id, "kind": o.kind, "dynamic": dyn,
                      "n_functions": len(o.payload.get("functions", [])) if o.kind == "plot" else 0,
-                     "tex": o.payload.get("tex") if o.kind == "equation" else None})
+                     "tex": o.payload.get("tex") if o.kind == "equation" else None,
+                     "labels": {k: o.payload[k] for k in ("x_label", "y_label") if o.payload.get(k)}
+                     if o.kind == "plot" else {}})
     # Parameter values the timeline passes through: each tween beat (tweens joined by
     # with_previous move together) sampled at TWEEN_SAMPLES points, so something
     # that only collides or leaves the frame mid-tween is still measured.
