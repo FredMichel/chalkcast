@@ -369,7 +369,7 @@ def test_shape_scale_is_rendered(scene):
 # B2. segments are placed by their endpoints: no silent scale/position fix
 def test_segment_cannot_be_scaled(scene):
     s = _id(srv.add_shape("line", x1=-9, y1=0, x2=9, y2=1))
-    assert "endpoints" in srv.update_object(s, scale=0.5)["error"]
+    assert "x1, y1, x2, y2" in srv.update_object(s, scale=0.5)["error"]
 
 
 # B3. update_object skipped the whole-number check of add_riemann
@@ -531,3 +531,52 @@ def test_estimated_segment_box_uses_endpoints(scene):
     s = _id(srv.add_shape("line", x1=5, y1=0, x2=20, y2=0))
     srv.add_step("write", targets=[s])
     assert any(o["lane"] == "framing" for o in inspect_scene(scene)["obligations"])
+
+
+# ---- fifth audit ----------------------------------------------------------------
+
+def _measured(scene):
+    pytest.importorskip("manim")
+    r = srv.inspect_render()
+    assert r["coverage"]["measured"] is True
+    return r
+
+
+# D1. where a tween leaves a moving curve/dot is checked against later writes
+@pytest.mark.parametrize("label_with_previous", [False, True])
+def test_collision_after_a_tween(scene, label_with_previous):
+    srv.add_parameter("a", 0)
+    p = _id(srv.add_plot(functions=["a*x"], x_range=[-4, 4], y_range=[-4, 4], height=6))
+    t = _id(srv.add_text("slope", x=2.0, y=2.0, font_size=36))
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="a", value=1, duration=2)
+    srv.add_step("write", targets=[t], with_previous=label_with_previous)
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" and "tween" in o["summary"] for o in r["obligations"])
+
+
+# D2. segments can be moved by their endpoints
+def test_update_segment_endpoints(scene):
+    s = _id(srv.add_shape("arrow", x1=0, y1=0, x2=2, y2=1))
+    r = srv.update_object(s, x2=3, y2=2)
+    assert r["ok"] and r["result"]["object"]["payload"]["x2"] == 3
+    assert srv.update_object(_id(srv.add_shape("dot")), x1=1)["ok"] is False
+
+
+# D3. fix_scene moving a plot keeps its overlays' stored position in sync
+def test_fix_scene_moves_overlays_with_plot(scene):
+    p = _id(srv.add_plot(functions=["x**2/4"], x_range=[-4, 4], y_range=[0, 4], x=4))
+    a = _id(srv.add_area(p, 0, 2))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    pytest.importorskip("manim")
+    srv.fix_scene()
+    assert scene.get_obj(a).position == scene.get_obj(p).position
+
+
+# D4. a new server process never reuses a project id whose directory exists
+def test_project_ids_skip_existing_directories(tmp_path):
+    (tmp_path / "proj-0100").mkdir()
+    import itertools
+    session._counter = itertools.count(100)
+    assert session.create_project().id == "proj-0101"

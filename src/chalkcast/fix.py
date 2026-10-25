@@ -55,9 +55,9 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
         if o is None:
             continue
         if o.kind == "plot":
-            pts += geo.curve_points(g)
+            pts += geo.curve_points(g) + geo.moving_points(g)
         elif o.kind == "shape":
-            pts += geo.ink(g)
+            pts += geo.ink(g) + geo.moving_points(g)
         elif o.kind in TEXTLIKE:
             b = geo.bbox(g)
             if b:
@@ -145,6 +145,10 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             x, y = obj.position
             obj.position = (round(x + dx, 3), round(y + dy, 3))
             obj.scale = new_scale
+            if obj.kind == "plot":  # overlays follow their plot (kept in the model too)
+                for dep in scene.objects:
+                    if dep.payload.get("plot") == obj.id:
+                        dep.position = obj.position
             touched.add(oid)
             changes.append({"object": oid, "lane": lane, "position": list(obj.position),
                             "scale": obj.scale, "reason": o["summary"]})

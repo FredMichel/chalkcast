@@ -97,6 +97,10 @@ class Geometry:
                 out.append(b)
         return out
 
+    def moving_points(self, oid: str) -> list[list[float]]:
+        """Every position a moving curve/shape takes during the tweens (measured)."""
+        return [p for st in self._states for p in st.get("ink", {}).get(oid, [])]
+
     def curve_points(self, plot_id: str) -> list[list[float]]:
         """Everything a label must not sit on: the curves and the axes' own ink."""
         rec = self._plots.get(plot_id, {})
@@ -215,6 +219,24 @@ def beat_conflicts(scene: Scene, only_step: int | None = None) -> list[str]:
                     out.append(f"step {st.index} ({st.kind}s '{tid}') shares a beat with a tween of "
                                f"{sorted(hit)}, which '{tid}' is drawn from: it would freeze during "
                                "the animation and then jump; put the tween in its own step")
+    return out
+
+
+def _beat_windows(scene: Scene) -> dict[int, tuple[list[int], list[int]]]:
+    """For each beat containing a tween, keyed by the beat's first tween step: the
+    step indices of the beat, and those after it until the next tween beat."""
+    beats = _beats(scene)
+    out: dict[int, tuple[list[int], list[int]]] = {}
+    for bi, beat in enumerate(beats):
+        tweens = [st.index for st in beat if st.kind == "tween"]
+        if not tweens:
+            continue
+        after: list[int] = []
+        for later in beats[bi + 1:]:
+            if any(st.kind == "tween" for st in later):
+                break
+            after += [st.index for st in later]
+        out[tweens[0]] = ([st.index for st in beat], after)
     return out
 
 
@@ -358,16 +380,22 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                     out.append(_obl(scene.id, "collision", sev, summary,
                                     "move one of them, or stagger their steps so they are not "
                                     "visible together", target=key[1], other=key[0]))
-    # moving curves/shapes: check every measured moment of every tween
+    # moving curves/shapes: check every measured moment of every tween against what
+    # is on screen during that beat -- and, for where the beat leaves them, against
+    # everything shown until the next tween moves them again
     tl = timeline(scene) if scene.steps else []
+    windows = _beat_windows(scene)
     for st in geo.states:
-        idx = int(st.get("step", 0)) - 1
-        if not 0 <= idx < len(tl):
+        start = int(st.get("step", 0))
+        if start not in windows:
             continue
-        shown = tl[idx]
+        during, after = windows[start]
+        steps = during + (after if st.get("beat_end") else [])
         for mover, pts in st.get("ink", {}).items():
-            if mover not in shown.values():
-                continue
+            shown: dict[str, str] = {}
+            for i in steps:
+                if mover in tl[i - 1].values():
+                    shown.update(tl[i - 1])
             for tid in shown:
                 tobj = scene.get_obj(tid)
                 if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in seen:
@@ -376,10 +404,10 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                 if tbox and any(_inside(p, tbox) for p in pts):
                     seen.add((tid, mover))
                     out.append(_obl(scene.id, "collision", "warning",
-                                    f"'{tid}' is crossed by '{mover}' while step {idx + 1} "
-                                    "animates it (measured)",
+                                    f"'{tid}' is crossed by '{mover}' during or after the tween "
+                                    f"of step {start} (measured)",
                                     "move the label out of the path, or limit the tween's range",
-                                    target=tid, other=mover, step=idx + 1))
+                                    target=tid, other=mover, step=start))
     return out
 
 

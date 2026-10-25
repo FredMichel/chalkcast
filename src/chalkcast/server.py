@@ -636,10 +636,13 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
                   at_x: str | None = None, at_y: str | None = None,
                   x_min: float | None = None, x_max: float | None = None,
                   dx: float | None = None, opacity: float | None = None,
+                  x1: float | None = None, y1: float | None = None,
+                  x2: float | None = None, y2: float | None = None,
                   scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
     """Change an existing object in place (only the fields you pass). Use it to
     reposition, rescale, recolor, retype text/LaTeX, replace plot functions or
     ranges, or adjust an area/Riemann interval -- no need to rebuild the scene.
+    Explicit line/arrow segments move by their endpoints x1, y1, x2, y2.
     Everything is validated first: on error nothing changes. A plot's color is the
     default color of its curves without one (axes keep the theme ink). Areas, Riemann
     sums and anchored shapes follow their plot: move the plot instead."""
@@ -680,6 +683,12 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
             return err(f"{field} must be in [0, 1]")
         p[field] = val
         changed.append(field)
+    for k, v in (("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2)):
+        if v is not None:
+            if "x2" not in p:
+                return err(f"'{k}' applies to a line/arrow created with x1, y1, x2, y2")
+            p[k] = v
+            changed.append(k)
     for r, name in ((x_range, "x_range"), (y_range, "y_range")):
         if r is not None:
             if obj.kind != "plot":
@@ -711,13 +720,13 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         changed.append("anchor")
     follows = obj.kind in ("area", "riemann") or bool(p.get("anchor")) or "x2" in p
     if (x is not None or y is not None) and follows:
-        return err(f"'{object_id}' is placed by its plot/anchor/endpoints, not by x/y"
+        return err(f"'{object_id}' is placed by its plot/anchor/endpoints (x1..y2), not by x/y"
                    + ("; move the plot instead" if obj.kind in ("area", "riemann") else ""))
     if scale is not None:
         if obj.kind in ("area", "riemann"):
             return err(f"'{object_id}' follows its plot; scale the plot instead")
         if "x2" in p:
-            return err(f"'{object_id}' is an explicit segment; change its endpoints instead")
+            return err(f"'{object_id}' is an explicit segment; change x1, y1, x2, y2 instead")
         if scale <= 0:
             return err("scale must be > 0")
     if obj.kind == "riemann":

@@ -28,7 +28,11 @@ def workdir(project_id: str, scene_id: str) -> Path:
 
 
 def create_project(**kw: Any) -> Project:
+    # skip ids whose directory exists: another (earlier) server process used them,
+    # and reusing one would overwrite artifacts it already handed out
     pid = f"proj-{next(_counter):04d}"
+    while pid in _projects or (_base_dir() / pid).exists():
+        pid = f"proj-{next(_counter):04d}"
     project = Project(id=pid, **kw)
     _projects[pid] = project
     _current["id"] = pid
