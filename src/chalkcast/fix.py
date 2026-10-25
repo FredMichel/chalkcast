@@ -157,6 +157,15 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             factor = min(1.0, 0.97 * sw / box.width if box.width else 1, 0.97 * sh / box.height if box.height else 1)
             if factor < 1.0:
                 new_scale = round(obj.scale * factor, 3)
+                if obj.kind in TEXTLIKE:
+                    # never below the readable size: the legibility repair would undo it
+                    z = zoom_while_visible(scene).get(oid, 1.0)
+                    base = float(obj.payload.get("font_size", 36)) if obj.kind == "text" else 48.0
+                    if base * new_scale * z < MIN_FONT_SIZE:
+                        unresolved.append({**o, "summary": o["summary"] + f"; '{oid}' is too long to "
+                                           "fit at a readable size: split it into shorter lines or "
+                                           "objects"})
+                        continue
                 box = BBox(cx=box.cx, cy=box.cy, width=box.width * factor, height=box.height * factor)
             dx, dy = _into(box, sl, sr, sb, st_)
             if factor == 1.0 and abs(dx) < 1e-3 and abs(dy) < 1e-3:

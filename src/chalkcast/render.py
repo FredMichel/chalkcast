@@ -120,6 +120,16 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
     return {"objects": objs, "param_states": states}
 
 
+def _fresh_env(workdir: Path) -> dict[str, str]:
+    """Environment for the probe / Manim subprocesses. The scene module is rewritten
+    in place on every edit, and Python trusts a cached .pyc whose source has the
+    same size and modification second: an edit like scale 1.5 -> 2.5 within a
+    second would run the old scene. No bytecode is written, and any left is removed."""
+    import os
+    shutil.rmtree(workdir / "__pycache__", ignore_errors=True)
+    return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
+
 def probe_scene(project: Project, scene: Scene, workdir: Path, timeout: float = 120) -> dict[str, Any]:
     """Build the scene's Mobjects in a subprocess and measure them (no video).
 
@@ -137,7 +147,8 @@ def probe_scene(project: Project, scene: Scene, workdir: Path, timeout: float = 
     t0 = time.time()
     try:
         proc = subprocess.run([sys.executable, "-m", "chalkcast.probe", str(module_path), str(spec_path)],
-                              capture_output=True, text=True, cwd=str(workdir), timeout=timeout)
+                              capture_output=True, text=True, cwd=str(workdir), timeout=timeout,
+                              env=_fresh_env(workdir))
     except subprocess.TimeoutExpired:
         # slow to measure is not broken: fall back to estimated geometry, say why
         return {"ok": None, "timeout": True,
@@ -179,7 +190,7 @@ def render_scene(project: Project, scene: Scene, workdir: Path, *, single_frame:
     cmd += [module_path.name, scene.class_name()]
 
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir), env=_fresh_env(workdir))
     elapsed = int((time.time() - t0) * 1000)
 
     if proc.returncode != 0:

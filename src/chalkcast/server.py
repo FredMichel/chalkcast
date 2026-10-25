@@ -62,7 +62,10 @@ def _require_scene(project_id: str | None, scene_id: str | None) -> tuple[Projec
         return err("no open project; call open_project first")
     scene = project.get_scene(scene_id)
     if scene is None:
-        return err("no such scene; call add_scene first")
+        if project.scenes:
+            return err(f"no scene {scene_id!r}; existing scenes: "
+                       f"{', '.join(sc.id for sc in project.scenes)}")
+        return err("no scene yet; call add_scene first")
     return project, scene
 
 
@@ -596,6 +599,9 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
             return err("transform needs exactly one target and a destination `to`")
         if to not in defined:
             return err(f"transform destination '{to}' does not exist; create it first")
+        if to == targets[0]:
+            return err(f"transforming '{to}' into itself changes nothing on screen; use highlight "
+                       "to draw attention to it")
         moving = [o for o in (targets[0], to) if is_dynamic(scene.get_obj(o), scene)]
         if moving:
             return err(f"{moving} follow a scene parameter and would snap back after a "
@@ -921,8 +927,9 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
                    "estimated findings are not auto-fixed")
     insp = inspect_scene(scene, measurement=probe, theme_name=project.theme)
     attempts: dict[str, int] = {}  # repairs tried per curve, so none is retried in a loop
+    unresolved: list[dict[str, Any]] = []
     for _ in range(max_rounds):
-        changes, _unresolved = apply_fixes(scene, insp["obligations"], probe, attempts)
+        changes, unresolved = apply_fixes(scene, insp["obligations"], probe, attempts)
         if not changes:
             break
         all_changes += changes
@@ -932,7 +939,11 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
             break
     obls = _register_obligations(project, scene.id, insp["obligations"])
     remaining = [o for o in obls if o["severity"] in ("error", "warning")]
-    return ok({"scene_id": scene.id, "changes": all_changes, "needs_author": remaining},
+    # why the fixer left something alone, when it says more than the finding itself
+    known = {o["summary"] for o in insp["obligations"]}
+    why = [u["summary"] for u in unresolved if u["summary"] not in known]
+    return ok({"scene_id": scene.id, "changes": all_changes, "needs_author": remaining,
+               "not_auto_fixable": why},
               coverage=_coverage(insp, scene), verdict=insp["verdict"], obligations=obls,
               limitations=insp["limitations"])
 
@@ -1051,6 +1062,20 @@ def inspect_environment() -> dict[str, Any]:
 def run() -> None:
     mcp.run()
 
+
+
+def _forbid_unknown_arguments() -> None:
+    """A misspelled argument (radius= for size=, xrange= for x_range=) must fail
+    loudly: by default the tool's argument model drops unknown fields and the call
+    succeeds with a default. Also advertised in each tool's input schema."""
+    for tool in mcp._tool_manager._tools.values():
+        model = tool.fn_metadata.arg_model
+        model.model_config["extra"] = "forbid"
+        model.model_rebuild(force=True)
+        tool.parameters = model.model_json_schema()
+
+
+_forbid_unknown_arguments()
 
 if __name__ == "__main__":
     run()

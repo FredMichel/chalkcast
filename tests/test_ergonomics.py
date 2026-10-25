@@ -1180,3 +1180,67 @@ def test_tick_number_format(scene):
 def test_close_project_reports_discarded(scene):
     r = srv.close_project()
     assert r["result"]["discarded"]["scenes"] == 1 and "files_kept" in r["result"]
+
+
+# ---- thirteenth audit -----------------------------------------------------------
+
+# M1. an edit that keeps the module the same size is measured, not a stale .pyc
+def test_same_size_edit_is_measured_fresh(scene):
+    e = _id(srv.add_equation("x^2+1", scale=1.5))
+    srv.add_step("write", targets=[e])
+    _measured(scene)
+    srv.update_object(e, scale=2.5)  # same source length, same second
+    from chalkcast import session as s
+    proj = s.get_project()
+    w1 = srv.inspect_render()
+    box = scene.get_obj(e)
+    from chalkcast import render
+    meas = render.probe_scene(proj, scene, s.workdir(proj.id, scene.id))
+    l, r, _, _ = meas["objects"][e]["bbox"]
+    assert r - l > 2.0  # at scale 2.5 (1.96 wide at 1.5)
+    assert w1["ok"] and box.scale == 2.5
+
+
+# M2. misspelled argument names are rejected, not dropped
+def test_unknown_argument_names_are_rejected(scene):
+    import asyncio
+    for name, args in (("add_shape", {"shape": "circle", "radius": 2}),
+                       ("add_text", {"text": "hi", "position": [2, 2]}),
+                       ("add_plot", {"functions": ["x"], "xrange": [0, 10]})):
+        with pytest.raises(Exception) as exc:
+            asyncio.run(srv.mcp.call_tool(name, args))
+        assert list(args)[-1] in str(exc.value)
+    schema = srv.mcp._tool_manager._tools["add_text"].parameters
+    assert schema.get("additionalProperties") is False
+
+
+# M3. framing repair stops at the readable size instead of fighting legibility
+def test_fix_does_not_shrink_text_below_readable(scene):
+    t = _id(srv.add_text("A very long paragraph " * 9, font_size=22))
+    srv.add_step("write", targets=[t])
+    pytest.importorskip("manim")
+    r = srv.fix_scene()
+    o = scene.get_obj(t)
+    assert 22 * o.scale >= 20 - 1e-6 and o.payload["font_size"] == 22
+    assert any("too long to fit" in why for why in r["result"]["not_auto_fixable"])
+
+
+# M4. side-by-side labels whose letters run into each other
+def test_side_by_side_labels_touching(scene):
+    a = _id(srv.add_text("Quite long label A", x=-3, y=-2))
+    b = _id(srv.add_text("Label B", x=-0.5, y=-2))
+    srv.add_step("write", targets=[a, b])
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" for o in r["obligations"])
+
+
+# M5. wrong scene ids list the existing ones; transforming into itself is refused
+def test_wrong_scene_id_lists_scenes(scene):
+    r = srv.add_text("x", scene_id="scene:1")
+    assert r["ok"] is False and "scene:0001" in r["error"]
+
+
+def test_transform_into_itself_refused(scene):
+    c = _id(srv.add_text("c"))
+    srv.add_step("write", targets=[c])
+    assert srv.add_step("transform", targets=[c], to=c)["ok"] is False

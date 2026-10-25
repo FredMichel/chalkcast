@@ -695,6 +695,13 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
     if ka in TEXTLIKE and kb in TEXTLIKE:
         ov = ba.overlap_area(bb)
         ratio = ov / min(ba.area, bb.area) if ov > 0 else 0
+        # side by side on one line: a small horizontal overlap is already letters
+        # running into each other (stacked lines overlap a little vertically, fine)
+        dx = min(ba.right, bb.right) - max(ba.left, bb.left)
+        dy = min(ba.top, bb.top) - max(ba.bottom, bb.bottom)
+        if dx > 0.03 and dy > 0.6 * min(ba.height, bb.height) and ratio < MEASURED_TEXT_OVERLAP:
+            return ("error", f"'{a.id}' and '{b.id}' run into each other on the same line "
+                             f"({dx:.2f} units of overlap, measured)")
         if ratio >= MEASURED_TEXT_OVERLAP:
             return ("error", f"'{a.id}' and '{b.id}' overlap (~{ratio * 100:.0f}% of the smaller, measured)")
         return None
