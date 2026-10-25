@@ -27,7 +27,7 @@ def test_benchmark_meets_verdict_targets(tmp_path):
     assert res["false_positive_rate"] < 0.05, bad
 
 
-@pytest.mark.parametrize("suffix", ["", "2", "3"])
+@pytest.mark.parametrize("suffix", ["", "2", "3", "4"])
 def test_holdout_benchmark_meets_verdict_targets(tmp_path, suffix):
     # cases labelled by authors who never read the verifier (bench_holdout*.py);
     # their first runs are the out-of-sample figures in the README

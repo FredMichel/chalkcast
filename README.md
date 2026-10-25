@@ -137,11 +137,14 @@ out-of-sample figure**:
 | Held-out 1 | 39 (24 defective) | 95.8 % / 7.7 % | over-strict safe margin; aliasing taken for a jump |
 | Held-out 2 | 47 (31 defective) | 90.3 % / 12.8 % | estimated noise after a compile error; straight arrows and box sides sampled only at their ends; equation size judged by box height |
 | Held-out 3 | 44 (26 defective) | **96.2 % / 0 %** | an arrow's shaft was never sampled (only its tip) |
+| Held-out 4 | 46 (25 defective) | **96.0 % / 0 %** | a label written *during* a zoom-in was excused as an intentional crop |
 
 After each set's bugs were fixed, every set (and the 40-case development set)
 scores 100 % / 0 %. From then on they are regression tests (`tests/test_measured.py`),
-not independent measures. Held-out 3 was written after the fixes for sets 1 and 2
-and run once, untouched: it is the current out-of-sample estimate.
+not independent measures. Held-out 3 was written after the fixes for sets 1 and 2,
+and held-out 4 (continuous tweens, simultaneous beats, transforms, camera moves)
+after eleven ergonomics audits; each was run once, untouched. Held-out 4 is the
+current out-of-sample estimate.
 
 ## Example (what the agent does)
 

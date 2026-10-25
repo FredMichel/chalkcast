@@ -425,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(prog="chalkcast bench")
     ap.add_argument("--estimated", action="store_true", help="skip the probe (estimated geometry)")
-    ap.add_argument("--holdout", type=int, nargs="?", const=1, choices=(1, 2, 3),
+    ap.add_argument("--holdout", type=int, nargs="?", const=1, choices=(1, 2, 3, 4),
                     help="run held-out set N (cases labelled by authors who never read the "
                          "verifier) instead of the development set")
     ap.add_argument("--json", action="store_true")

@@ -475,6 +475,16 @@ def _base_views(scene: Scene) -> dict[int, tuple[BBox, BBox]]:
     return out
 
 
+def _zoom_in_start(scene: Scene) -> dict[int, int | None]:
+    """After each step: the step at which the current zoomed-in stretch began."""
+    cams, start, out = camera_by_step(scene), None, {}
+    for st in scene.steps:
+        zoomed = cams[st.index][1].width < FRAME_WIDTH - 1e-9
+        start = (start if start is not None else st.index) if zoomed else None
+        out[st.index] = start
+    return out
+
+
 def _judge(box: BBox, view: BBox, base: BBox) -> tuple[float, BBox]:
     """(overflow, frame it is judged in). A box partly inside a zoomed-in view is
     cropped by design: it is judged in the base frame instead. One entirely
@@ -501,8 +511,16 @@ def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
     in the same beat is interpolated); where a tween lands, under the views of
     the steps until the next tween. Each view comes with its base frame."""
     steps = {i for i, _ in seen}
-    bases = _base_views(scene)
-    end_view = {i: (v, bases.get(i, (DEFAULT_VIEW, DEFAULT_VIEW))[1]) for i, v in seen}  # 0: no steps
+    bases, zin = _base_views(scene), _zoom_in_start(scene)
+    first = min(steps)
+
+    def allowed(base: BBox, view: BBox, zoom_from: int | None) -> BBox:
+        # cropping is by design only for what was on screen before the zoom-in;
+        # something written while zoomed in is meant to be seen in that view
+        return base if zoom_from is not None and first < zoom_from else view
+
+    end_view = {i: (v, allowed(bases[i][1], v, zin.get(i))) if i in bases else (v, v)
+                for i, v in seen}  # 0: a scene without steps
     obj = scene.get_obj(oid)
     dynamic = obj is not None and is_dynamic(obj, scene)
     initial, states = geo.states_while(oid, steps)
@@ -526,8 +544,8 @@ def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
                 c = cam[-1]
                 # frac is the time fraction of the beat; the camera eases over its own run_time
                 f = smooth(min(1.0, float(st.get("frac", 1.0)) * tween_t / max(c.duration, 1e-9)))
-                views.append((_lerp_view(cams[during[0]][0], cams[c.index][1], f),
-                              bases[during[0]][0]))
+                v = _lerp_view(cams[during[0]][0], cams[c.index][1], f)
+                views.append((v, allowed(bases[during[0]][0], v, c.index)))
             else:
                 views += [end_view[i] for i in during if i in steps]
         if st.get("beat_end"):

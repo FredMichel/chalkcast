@@ -1092,3 +1092,12 @@ def test_scene_without_steps_still_measures(scene):
     _id(srv.add_text("NO STEPS"))
     r = _measured(scene)
     assert any("no steps" in o["summary"] for o in r["obligations"])
+
+
+# K1b. a label written while zoomed in is judged in that view (held-out 4)
+def test_label_written_during_zoom_is_framed_in_that_view(scene):
+    t = _id(srv.add_text("intensity drops fast", x=-1.0, y=0.0, font_size=28))
+    srv.add_step("camera_move", zoom=2.5, focus_x=-3, focus_y=-1)
+    srv.add_step("write", targets=[t])
+    r = _measured(scene)
+    assert any(o["lane"] == "framing" and o["severity"] == "error" for o in r["obligations"])
