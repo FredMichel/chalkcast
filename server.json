@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.FredMichel/chalkcast",
+  "title": "Chalkcast",
+  "description": "Author, render and visually verify Manim math animations from natural language",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/FredMichel/chalkcast",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "chalkcast",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

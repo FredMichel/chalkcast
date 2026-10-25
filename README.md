@@ -61,7 +61,7 @@ Every render returns **evidence** (the artifact + sampled frames) and a structur
 **One command** (Claude Code; needs [uv](https://docs.astral.sh/uv/)):
 
 ```bash
-claude mcp add chalkcast -- uvx --python 3.12 --from "chalkcast[render] @ git+https://github.com/FredMichel/chalkcast" chalkcast serve
+claude mcp add chalkcast -- uvx --python 3.12 --from "chalkcast[render]" chalkcast serve
 ```
 
 `--python 3.12` matters: Chalkcast needs Python ≥ 3.11, and uv downloads one if the
@@ -70,7 +70,7 @@ system Python is older (macOS ships 3.9). Then just ask in natural language.
 Or with pip, into any Python ≥ 3.11 environment:
 
 ```bash
-pip install "chalkcast[render] @ git+https://github.com/FredMichel/chalkcast"
+pip install "chalkcast[render]"
 claude mcp add chalkcast -- chalkcast serve
 ```
 
@@ -165,8 +165,10 @@ export_gif()        # -> shareable GIF (blocked if error obligations remain)
 
 Alpha. Scientific correctness is tested numerically (`tests/test_science.py`): shaded
 areas equal their integrals, Riemann rectangles their sum, drawn curves their
-function (including sin 30x), and the Gibbs peak its theoretical value. Not yet on
-PyPI. Vision-based `intent` verification is next (see [`docs/SPEC.md`](docs/SPEC.md)).
+function (including sin 30x), and the Gibbs peak its theoretical value. On
+[PyPI](https://pypi.org/project/chalkcast/) and the
+[MCP Registry](https://registry.modelcontextprotocol.io/) (`io.github.FredMichel/chalkcast`).
+Vision-based `intent` verification is next (see [`docs/SPEC.md`](docs/SPEC.md)).
 
 ## License
 
