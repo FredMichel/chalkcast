@@ -214,7 +214,9 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             cand.sort(key=lambda c: -first.get(c, 0))
             target = cand[0] if cand else None
             if target is None:
-                unresolved.append(o)
+                unresolved.append({**o, "summary": o["summary"] + ": no movable label in it "
+                                   "(fix_scene moves text and equations only); change the "
+                                   "ranges, the tween or the positions"})
                 continue
             tobj = scene.get_obj(target)
             box = geo.bbox(target)

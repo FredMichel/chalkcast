@@ -379,7 +379,11 @@ def _define_plot(obj: Obj, ink: str, scene: Scene) -> list[str]:
     # labelled and an unlabelled plot at the same x/y line up
     x, y = obj.position
     lines.append(f"{var} = VGroup({', '.join(members)}){_scale(obj)}")
-    lines.append(f"{var}.shift(np.array([{x}, {y}, 0]) - {ax}.get_center())")
+    # the data rectangle's centre goes to (x, y): get_center() would include the
+    # tick numbers and labels, shifting the axes when show_numbers is toggled
+    xc = (float(x_range[0]) + float(x_range[1])) / 2
+    yc = (float(y_range[0]) + float(y_range[1])) / 2
+    lines.append(f"{var}.shift(np.array([{x}, {y}, 0]) - {ax}.c2p({xc}, {yc}))")
     return lines
 
 

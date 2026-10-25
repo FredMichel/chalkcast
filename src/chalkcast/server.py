@@ -56,6 +56,18 @@ _STEP_ARGS: dict[str, set[str]] = {
 # helpers
 # ---------------------------------------------------------------------------
 
+def _to_scene(plot: Obj) -> dict[str, Any]:
+    """Data -> scene coordinates of a plot (exact: codegen centres the data rectangle)."""
+    p = plot.payload
+    (x0, x1), (y0, y1) = p["x_range"][:2], p["y_range"][:2]
+    sx = plot.scale * float(p.get("width", 8.0)) / (x1 - x0)
+    sy = plot.scale * float(p.get("height", 5.0)) / (y1 - y0)
+    cx, cy = plot.position
+    ox, oy = cx - sx * (x0 + x1) / 2, cy - sy * (y0 + y1) / 2
+    return {"formula": f"scene = ({ox:.4g} + {sx:.4g}*u, {oy:.4g} + {sy:.4g}*v) for data (u, v)",
+            "origin": [round(ox, 4), round(oy, 4)], "x_unit": round(sx, 4), "y_unit": round(sy, 4)}
+
+
 def _no_project(project_id: str | None) -> str:
     """Name the open projects: a closed or mistyped id is not 'no project'."""
     open_ids = session.open_project_ids()
@@ -388,8 +400,10 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
     Defaults: x_range [-5, 5, 1], y_range [-3, 3, 1]; a [min, max] range gets a
     readable tick step (4-8 ticks, starting at min, or at 0 if 0 is inside the range);
     the result echoes the ranges used. Curves
-    without a color get distinct colors suited to the theme. The axes are centred at
-    (x, y); labels hang off them. Without functions you get bare axes. The axes end
+    without a color get distinct colors suited to the theme. The data rectangle
+    [x_min, x_max] x [y_min, y_max] is centred at (x, y) (tick numbers and labels hang
+    off it); the result's `to_scene` gives the scene point of a data point, for lines,
+    arrows and text placed by hand (anchored dots use plot_id instead). Without functions you get bare axes. The axes end
     in arrow tips at x_max / y_max, so those two values get no tick or number
     (mark a bound there with add_text/add_equation if it matters)."""
     got = _require_scene(project_id, scene_id)
@@ -422,7 +436,8 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
         payload["show_numbers"] = True
     scene.objects.append(Obj(id=oid, kind="plot", position=(x, y), payload=payload))
     return ok({"scene_id": scene.id, "object_id": oid, "functions": len(funcs),
-               "x_range": payload["x_range"], "y_range": payload["y_range"]}, untrusted=["expr"],
+               "x_range": payload["x_range"], "y_range": payload["y_range"],
+               "to_scene": _to_scene(scene.objects[-1])}, untrusted=["expr"],
               limitations=["no tick or number at x_max / y_max: the axis tips sit there"]
               if show_numbers else [])
 
@@ -866,7 +881,22 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     if color is not None:
         obj.color = color
         changed.append("color")
+    if obj.kind == "plot" and set(changed) & {"x_range", "y_range", "width", "height", "position",
+                                                "scale", "show_numbers"}:
+        cx, cy = obj.position
+        w = obj.scale * float(obj.payload.get("width", 8.0)) / 2
+        h = obj.scale * float(obj.payload.get("height", 5.0)) / 2
+        near = [o.id for o in scene.objects if o.kind in ("text", "equation", "shape")
+                and not o.payload.get("anchor") and abs(o.position[0] - cx) <= w + 0.5
+                and abs(o.position[1] - cy) <= h + 0.5]
+        if near:
+            notes.append(f"{near} are placed in scene coordinates over this plot and did not "
+                         "move with its curves: re-place them (see to_scene)")
+        changed_map = _to_scene(obj)
+    else:
+        changed_map = None
     return ok({"scene_id": scene.id, "object_id": object_id, "changed": changed,
+               **({"to_scene": changed_map} if changed_map else {}),
                "object": obj.to_dict()}, limitations=notes)
 
 

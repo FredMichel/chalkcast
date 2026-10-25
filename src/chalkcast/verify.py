@@ -872,9 +872,15 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
             for g in key:
                 if g in shown_as:
                     summary += f" ('{g}' is on screen as {', '.join(repr(s) for s in sorted(shown_as[g]))})"
+            # the text-like side is the target (the one to move), as fix_scene does
+            tgt, oth = key[1], key[0]
+            if a.kind in TEXTLIKE and b.kind not in TEXTLIKE:
+                tgt, oth = a.id, b.id
+            elif b.kind in TEXTLIKE and a.kind not in TEXTLIKE:
+                tgt, oth = b.id, a.id
             out.append(_obl(scene.id, "collision", sev, summary,
                             "move one of them, or stagger their steps so they are not "
-                            "visible together", target=key[1], other=key[0]))
+                            "visible together", target=tgt, other=oth))
     # moving curves/shapes: check every measured moment of every tween against what
     # is on screen during that beat -- and, for where the beat leaves them, against
     # everything shown until the next tween moves them again
@@ -921,11 +927,24 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             f"a curve of '{obj.id}' runs through {len(hit)} of its tick numbers "
                             "(measured)", "change y_range/x_range so the axes sit clear of the "
                             "curve (e.g. include 0), or drop show_numbers", target=obj.id))
-        if any(_inside(p, lb, shrink=0.0) for lb in lbs for p in pts):
-            out.append(_obl(scene.id, "collision", "error",
-                            f"a curve of '{obj.id}' runs through its own axis label (measured)",
-                            "shorten the label, widen the plot, or change y_range so the curve "
-                            "clears the axis end", target=obj.id))
+        static = [p for c in geo.curves(obj.id) for p in c.get("points", [])]
+        axes = geo.axes_box(obj.id)
+        for lb in lbs:
+            which = "y_label" if axes and lb.cy > axes.top - 0.05 else "x_label"
+            if any(_inside(p, lb, shrink=0.0) for p in static) and not is_dynamic(obj, scene):
+                out.append(_obl(scene.id, "collision", "error",
+                                f"a curve of '{obj.id}' runs through its own {which} (measured)",
+                                "change y_range/x_range so the curve clears the axis end, widen "
+                                "the plot, or shorten the label", target=obj.id))
+            elif any(_inside(p, lb, shrink=0.0) for p in pts):
+                tw = [st.index for st in scene.steps if st.kind == "tween"
+                      and st.param in obj_params(obj, scene)]
+                out.append(_obl(scene.id, "collision", "error",
+                                f"a curve of '{obj.id}' runs through its own {which} during or "
+                                f"after the tween(s) at step(s) {tw} (measured)",
+                                "limit the tween's range, or widen y_range/x_range so the moving "
+                                "curve clears the axis end", target=obj.id,
+                                step=tw[0] if tw else None))
         for sh in scene.objects:
             if sh.kind != "shape" or (sh.payload.get("anchor") or {}).get("plot") != obj.id:
                 continue

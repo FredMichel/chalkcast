@@ -79,10 +79,17 @@ def test_riemann_rectangles_sum(tmp_path):
             payload={"plot": "plot_1", "x_min": 0, "x_max": 4, "dx": 0.5}),
     ])
     ax = ns["plot_1_ax"]
-    total = sum(_shoelace(_coords(ax, r)[::4]) for r in ns["riemann_2"])
+    rects = [_coords(ax, r)[::4] for r in ns["riemann_2"]]
+    assert len(rects) == 8
+    # each height is f at the left edge, exactly
+    for x, c in zip(np.arange(0, 4, 0.5), rects):
+        assert c[:, 1].max() == pytest.approx(np.sqrt(x), abs=1e-9)
+        assert c[:, 0].min() == pytest.approx(x, abs=1e-9)
+    # Manim draws each rectangle 0.1 % wider than dx (0.5005 for 0.5), so the drawn
+    # total sits 0.1 % above the left sum: allow that, not more
+    total = sum(_shoelace(c) for c in rects)
     left = sum(np.sqrt(x) * 0.5 for x in np.arange(0, 4, 0.5))
-    assert len(ns["riemann_2"]) == 8
-    assert total == pytest.approx(left, rel=1e-3)
+    assert total == pytest.approx(left, rel=1.5e-3)
 
 
 @pytest.mark.parametrize("expr,f,xr,yr", [

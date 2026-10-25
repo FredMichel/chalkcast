@@ -302,7 +302,8 @@ def test_anchor_cannot_use_x(scene):
 # A9. labels shifted the axes away from (x, y)
 def test_axes_are_centred_at_the_plot_position(scene):
     _id(srv.add_plot(functions=["sin(x)"], x_label=r"\text{time (s)}", x=1, y=-1))
-    assert "plot_1.shift(np.array([1, -1, 0]) - plot_1_ax.get_center())" in \
+    # the data rectangle's centre, not get_center() (which includes labels/numbers)
+    assert "plot_1.shift(np.array([1, -1, 0]) - plot_1_ax.c2p(0.0, 0.0))" in \
         generate_module(scene, "chalkboard")
 
 
@@ -1323,7 +1324,7 @@ def test_curve_strikes_its_own_wide_label(scene):
                          width=10, height=3.5, x_label="\\text{distance (m)}"))
     srv.add_step("write", targets=[p])
     r = _measured(scene)
-    assert any("own axis label" in o["summary"] for o in r["obligations"] if o["severity"] == "error")
+    assert any("own x_label" in o["summary"] for o in r["obligations"] if o["severity"] == "error")
 
 
 # P2. a refusal naming something another scene has says where it is
@@ -1617,3 +1618,63 @@ def test_dots_only_equation(scene):
     srv.add_step("write", targets=[e])
     r = _measured(scene)
     assert not any("smallest symbols" in o["summary"] for o in r["obligations"])
+
+
+# ---- nineteenth audit -------------------------------------------------------------
+
+# T1. the data rectangle is centred at (x, y) with or without numbers; to_scene is exact
+@pytest.mark.parametrize("numbers", [False, True])
+def test_to_scene_matches_the_drawing(scene, numbers):
+    r = srv.add_plot(functions=["x/10"], x_range=[0, 10, 2], y_range=[0, 1, 0.25], width=8,
+                     height=4, x=0.5, y=-0.5, show_numbers=numbers)
+    p, m = _id(r), r["result"]["to_scene"]
+    assert m["origin"] == pytest.approx([-3.5, -2.5])
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="6", at_y="0.5"))
+    srv.add_step("write", targets=[p, d])
+    pytest.importorskip("manim")
+    from chalkcast import render
+    proj = session.get_project()
+    meas = render.probe_scene(proj, scene, session.workdir(proj.id, scene.id))
+    l, rr, b, t = meas["objects"][d]["bbox"]
+    want = (m["origin"][0] + 6 * m["x_unit"], m["origin"][1] + 0.5 * m["y_unit"])
+    assert ((l + rr) / 2, (b + t) / 2) == pytest.approx(want, abs=0.01)
+
+
+# T2. an own-axis-label hit caused by a tween names the label and the tween
+def test_own_label_hit_by_tween(scene):
+    srv.add_parameter("d", 0)
+    p = _id(srv.add_plot(functions=["2+x", "10-x+d"], x_range=[0, 10, 2], y_range=[0, 12, 2],
+                         y_label="P"))
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="d", value=3)
+    r = _measured(scene)
+    hit = [o for o in r["obligations"] if "own" in o["summary"] and "label" in o["summary"]]
+    assert hit and "y_label" in hit[0]["summary"] and "tween" in hit[0]["summary"]
+    assert hit[0]["step"] == 2
+
+
+# T3. unknown names: np.nan, and the parameter hint only when it is close
+def test_unknown_name_hints(scene):
+    srv.add_parameter("a", 1)
+    r = srv.add_plot(functions=[{"expr": "np.where(x<=0, -x, nan)"}])
+    assert r["ok"] is False and "np.nan" in r["error"]
+    r = srv.add_plot(functions=["aa*x"])
+    assert r["ok"] is False and "'a'" in r["error"]
+
+
+# T4. the label is the target of a collision with a drawing
+def test_collision_target_is_the_label(scene):
+    ln = _id(srv.add_shape("line", x1=-1, y1=-1, x2=3, y2=-1))
+    e = _id(srv.add_equation("V = IR", x=1, y=-1))
+    srv.add_step("write", targets=[ln, e])
+    r = _measured(scene)
+    col = [o for o in r["obligations"] if o["lane"] == "collision"]
+    assert col and col[0]["target"] == e
+
+
+# T5. editing a plot's ranges names the hand-placed objects left behind
+def test_range_edit_names_left_behind(scene):
+    p = _id(srv.add_plot(functions=["x"], x_range=[0, 10], y_range=[0, 10]))
+    t = _id(srv.add_text("Supply", x=1, y=1))
+    r = srv.update_object(p, y_range=[0, 14, 2])
+    assert any(t in n for n in r["limitations"]) and "to_scene" in r["result"]

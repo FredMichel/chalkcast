@@ -74,7 +74,14 @@ def validate(expr: str, params: Iterable[str] = ()) -> None:
             if node.attr.startswith("_") or not hasattr(np, node.attr):
                 raise ExprError(f"np.{node.attr} is not a numpy function")
         if isinstance(node, ast.Name) and node.id not in allowed:
-            hint = f" (did you mean a scene parameter? declared: {sorted(params)})" if params else ""
+            import difflib
+            close = difflib.get_close_matches(node.id, list(params), n=1)
+            if node.id.lower() in ("nan", "inf", "infinity"):
+                hint = f" (write np.{node.id.lower()[:3]})"
+            elif close:
+                hint = f" (did you mean the scene parameter '{close[0]}'?)"
+            else:
+                hint = f" (declared parameters: {sorted(params)})" if params else ""
             raise ExprError(f"unknown name '{node.id}' in {expr!r}; use x, math functions "
                             f"like sin/exp/sqrt, np.<fn>, or a scene parameter{hint}")
 
