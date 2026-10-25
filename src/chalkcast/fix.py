@@ -198,6 +198,17 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                         changes.append({"object": seg.id, "lane": lane, "endpoints":
                                         [pl["x1"], pl["y1"], pl["x2"], pl["y2"]],
                                         "reason": f"drawn on '{oid}', moved with it"})
+                # labels and dots placed by hand over its data rectangle (via to_scene)
+                for o2 in scene.objects:
+                    if (axes is None or o2.id in touched or "x2" in o2.payload
+                            or o2.payload.get("anchor") or o2.kind not in ("text", "equation", "shape")):
+                        continue
+                    px, py = o2.position
+                    if axes.left <= px <= axes.right and axes.bottom <= py <= axes.top:
+                        o2.position = (round(px + dx, 3), round(py + dy, 3))
+                        touched.add(o2.id)
+                        changes.append({"object": o2.id, "lane": lane, "position": list(o2.position),
+                                        "reason": f"placed over '{oid}', moved with it"})
             touched.add(oid)
             changes.append({"object": oid, "lane": lane, "position": list(obj.position),
                             "scale": obj.scale, "reason": o["summary"]})

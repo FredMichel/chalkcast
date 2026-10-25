@@ -64,8 +64,12 @@ def _to_scene(plot: Obj) -> dict[str, Any]:
     sy = plot.scale * float(p.get("height", 5.0)) / (y1 - y0)
     cx, cy = plot.position
     ox, oy = cx - sx * (x0 + x1) / 2, cy - sy * (y0 + y1) / 2
-    return {"formula": f"scene = ({ox:.4g} + {sx:.4g}*u, {oy:.4g} + {sy:.4g}*v) for data (u, v)",
-            "origin": [round(ox, 4), round(oy, 4)], "x_unit": round(sx, 4), "y_unit": round(sy, 4)}
+    # data centre -> plot centre: exact for offset ranges ([2000, 2024]) and tiny units
+    xc, yc = (x0 + x1) / 2, (y0 + y1) / 2
+    return {"formula": f"scene = ({cx!r} + {sx!r}*(u - {xc!r}), {cy!r} + {sy!r}*(v - {yc!r})) "
+                       "for data (u, v)",
+            "origin": [ox, oy], "x_unit": sx, "y_unit": sy, "data_centre": [xc, yc],
+            "scene_centre": [cx, cy]}
 
 
 def _no_project(project_id: str | None) -> str:
@@ -882,13 +886,16 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         obj.color = color
         changed.append("color")
     if obj.kind == "plot" and set(changed) & {"x_range", "y_range", "width", "height", "position",
-                                                "scale", "show_numbers"}:
+                                                "scale"}:
         cx, cy = obj.position
         w = obj.scale * float(obj.payload.get("width", 8.0)) / 2
         h = obj.scale * float(obj.payload.get("height", 5.0)) / 2
+        def over(px: float, py: float) -> bool:
+            return abs(px - cx) <= w + 0.5 and abs(py - cy) <= h + 0.5
         near = [o.id for o in scene.objects if o.kind in ("text", "equation", "shape")
-                and not o.payload.get("anchor") and abs(o.position[0] - cx) <= w + 0.5
-                and abs(o.position[1] - cy) <= h + 0.5]
+                and not o.payload.get("anchor")
+                and (any(over(o.payload["x1" if i == 0 else "x2"], o.payload["y1" if i == 0 else "y2"])
+                         for i in (0, 1)) if "x2" in o.payload else over(*o.position))]
         if near:
             notes.append(f"{near} are placed in scene coordinates over this plot and did not "
                          "move with its curves: re-place them (see to_scene)")

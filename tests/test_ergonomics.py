@@ -1678,3 +1678,57 @@ def test_range_edit_names_left_behind(scene):
     t = _id(srv.add_text("Supply", x=1, y=1))
     r = srv.update_object(p, y_range=[0, 14, 2])
     assert any(t in n for n in r["limitations"]) and "to_scene" in r["result"]
+
+
+# ---- twentieth audit --------------------------------------------------------------
+
+# U1. text printed over a plot's axis label is an error, said as such
+def test_text_over_axis_label_is_an_error(scene):
+    p = _id(srv.add_plot(x_range=[-4, 4], y_range=[-3, 3], x_label="\\mathrm{Re}", y_label="\\mathrm{Im}"))
+    e = _id(srv.add_equation("z=3+i", x=4.35, y=0.35))
+    t = _id(srv.add_text("Imag", x=0.35, y=2.75))
+    srv.add_step("write", targets=[p, e, t])
+    r = _measured(scene)
+    errs = [o for o in r["obligations"] if o["severity"] == "error" and "printed over" in o["summary"]]
+    assert {o["target"] for o in errs} >= {e, t}
+
+
+# U2. fix_scene moves hand-placed labels and dots with their plot
+def test_fix_moves_hand_placed_with_plot(scene):
+    r = srv.add_plot(functions=["0.5*x**2"], x_range=[-4, 4], y_range=[-1, 8], width=10, height=6,
+                     x=2.5, y=-0.5)
+    p, m = _id(r), r["result"]["to_scene"]
+    X, Y = m["origin"][0] + 2 * m["x_unit"], m["origin"][1] + 2 * m["y_unit"]
+    d = _id(srv.add_shape("dot", x=X, y=Y))
+    srv.add_step("write", targets=[p, d])
+    pytest.importorskip("manim")
+    res = srv.fix_scene()["result"]
+    moved = scene.get_obj(p).position[0] - 2.5
+    if abs(moved) > 1e-3:
+        assert scene.get_obj(d).position[0] == pytest.approx(X + moved, abs=1e-3)
+        assert any(c["object"] == d for c in res["changes"])
+
+
+# U3. a scene whose steps show nothing is an error
+def test_blank_video_is_an_error(scene):
+    _id(srv.add_text("A"))
+    srv.add_step("wait", duration=1)
+    assert any("video is blank" in o["summary"] for o in _lanes(scene))
+
+
+# U4. to_scene keeps full precision (offset ranges, tiny units)
+def test_to_scene_precision(scene):
+    m = srv.add_plot(functions=["x"], x_range=[2000, 2024], y_range=[0, 1e6], width=8,
+                     height=4)["result"]["to_scene"]
+    assert m["y_unit"] == pytest.approx(4e-6)
+    assert m["origin"][0] + 2010 * m["x_unit"] == pytest.approx(-4 + 10 * 8 / 24)
+
+
+# U5. the left-behind note uses segment endpoints and ignores show_numbers
+def test_left_behind_note_uses_endpoints(scene):
+    p = _id(srv.add_plot(functions=["x"], x=-3.5, width=4, height=3))
+    ln = _id(srv.add_shape("line", x1=-3.5, y1=-1, x2=-3.5, y2=1))
+    r = srv.update_object(p, y_range=[-5, 5])
+    assert any(ln in n for n in r["limitations"])
+    r = srv.update_object(p, show_numbers=True)
+    assert not any("did not move" in n for n in r["limitations"])

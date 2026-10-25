@@ -816,6 +816,15 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
     if ka in TEXTLIKE or kb in TEXTLIKE:
         txt, other = (a, b) if ka in TEXTLIKE else (b, a)
         tbox = geo.bbox(txt.id)
+        if other.kind == "plot" and tbox:
+            # printed over the plot's own axis label: two texts on top of each other
+            axes = geo.axes_box(other.id)
+            for lb in geo.label_boxes(other.id):
+                ov = lb.overlap_area(tbox)
+                if ov > 0 and ov / min(lb.area, tbox.area) >= 0.15:
+                    which = "y_label" if axes and lb.cy > axes.top - 0.05 else "x_label"
+                    return ("error", f"'{txt.id}' is printed over the {which} of '{other.id}' "
+                                     f"(~{ov / min(lb.area, tbox.area) * 100:.0f}% of the smaller, measured)")
         if static_only and other.kind != "plot":
             return None
         pts = (geo.axes_points(other.id) if static_only else geo.curve_points(other.id)) \
@@ -1304,6 +1313,10 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
             used.update(st.targets)
             if st.to:
                 used.add(st.to)
+        if scene.objects and not used:
+            out.append(_obl(scene.id, "timing", "error",
+                            "no step shows anything (only waits, tweens or camera moves): the "
+                            "video is blank", "add write steps for the objects to display"))
         shown_params = set().union(*(obj_params(o, scene) for o in scene.objects if o.id in used)) \
             if used else set()
         for o in scene.objects:
