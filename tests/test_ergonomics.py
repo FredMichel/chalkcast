@@ -1551,3 +1551,69 @@ def test_labels_touching_without_gap(scene):
     r = _measured(scene)
     assert any("no space between" in o["summary"] or "run into each other" in o["summary"]
                for o in r["obligations"])
+
+
+# ---- eighteenth audit -------------------------------------------------------------
+
+def _bell(**kw):
+    return _id(srv.add_plot(functions=["exp(-x**2/2)/sqrt(2*pi)"], x_range=[-4, 4, 1],
+                            y_range=[0, 0.5, 0.1], y=-0.7, width=10, height=4.5, **kw))
+
+
+# S1. a label beside a bell curve is not "painted over" by the fill's empty corners
+def test_fill_cover_uses_the_outline(scene):
+    p = _bell()
+    t = _id(srv.add_text("95%", x=2.6, y=0.2))
+    a = _id(srv.add_area(plot_id=p, x_min=-2, x_max=2, color="TEAL", opacity=0.6))
+    srv.add_step("write", targets=[p, t])
+    srv.add_step("write", targets=[a])
+    r = _measured(scene)
+    assert not any("painted over" in o["summary"] for o in r["obligations"])
+
+
+def test_fill_over_label_still_caught(scene):
+    p = _bell()
+    t = _id(srv.add_text("68%", x=0, y=-1.6))
+    a = _id(srv.add_area(plot_id=p, x_min=-1, x_max=1, color="TEAL", opacity=0.6))
+    srv.add_step("write", targets=[p, t])
+    srv.add_step("write", targets=[a])
+    r = _measured(scene)
+    assert any("painted over" in o["summary"] for o in r["obligations"])
+
+
+# S2. stacking follows the object on screen through transforms
+def test_fill_order_through_transforms(scene):
+    p = _bell()
+    a1 = _id(srv.add_area(plot_id=p, x_min=-1, x_max=1, color="BLUE", opacity=0.6))
+    t1 = _id(srv.add_text("68%", x=0, y=-1.6))
+    a2 = _id(srv.add_area(plot_id=p, x_min=-2, x_max=2, color="TEAL", opacity=0.6))
+    t2 = _id(srv.add_text("95%", x=0, y=-1.6))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a1])
+    srv.add_step("write", targets=[t1])
+    srv.add_step("transform", targets=[a1], to=a2)
+    srv.add_step("transform", targets=[t1], to=t2)
+    r = _measured(scene)
+    assert not any("painted over" in o["summary"] for o in r["obligations"])
+
+
+# S3. durations count Manim's frames: plays round up, static waits round down
+def test_duration_matches_manim_frames():
+    srv.open_project(fps=10)
+    srv.add_scene("t")
+    t = _id(srv.add_text("A"))
+    srv.add_step("write", targets=[t])
+    r = srv.add_step("wait", duration=0.3)  # int(0.3 / 0.1) == 2 frames
+    assert r["result"]["scene_duration"] == pytest.approx(1.2)
+    srv.open_project()  # 15 fps: write 1.0 (15 frames) + end hold int(0.5*15) = 7
+    srv.add_scene("t")
+    r = srv.add_step("write", targets=[_id(srv.add_text("A"))])
+    assert r["result"]["scene_duration"] == pytest.approx(22 / 15)
+
+
+# S4. an equation made only of dots is not "illegible"
+def test_dots_only_equation(scene):
+    e = _id(srv.add_equation("\\cdots"))
+    srv.add_step("write", targets=[e])
+    r = _measured(scene)
+    assert not any("smallest symbols" in o["summary"] for o in r["obligations"])

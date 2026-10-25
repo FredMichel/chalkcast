@@ -74,6 +74,7 @@ class Geometry:
         self._objs = (m or {}).get("objects", {})
         self._plots = (m or {}).get("plots", {})
         self._ink = (m or {}).get("ink", {})
+        self._fills = (m or {}).get("fills", {})
         self._states = (m or {}).get("states", [])
         self.states = self._states
 
@@ -148,11 +149,32 @@ class Geometry:
     def axes_box(self, plot_id: str) -> BBox | None:
         return self._box(self._plots.get(plot_id, {}).get("axes_bbox"))
 
+    def fill_cover(self, fill_id: str, box: BBox) -> float | None:
+        """Fraction of ``box`` inside the filled region (polygons, even-odd), or None
+        when the fill's outline was not measured."""
+        polys = self._fills.get(fill_id)
+        if not polys:
+            return None
+        nx, ny = 9, 5
+        pts = [(box.left + (i + 0.5) * box.width / nx, box.bottom + (j + 0.5) * box.height / ny)
+               for i in range(nx) for j in range(ny)]
+        return sum(any(_in_polygon(x, y, pg) for pg in polys) for x, y in pts) / len(pts)
+
     def ink(self, oid: str) -> list[list[float]]:
         return self._ink.get(oid, [])
 
     def curves(self, plot_id: str) -> list[dict[str, Any]]:
         return self._plots.get(plot_id, {}).get("curves", [])
+
+
+def _in_polygon(x: float, y: float, poly: list[list[float]]) -> bool:
+    inside, j = False, len(poly) - 1
+    for i in range(len(poly)):
+        (xi, yi), (xj, yj) = poly[i], poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
 
 
 def timeline(scene: Scene) -> list[dict[str, str]]:
@@ -712,12 +734,16 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     return out + _pulse_framing(scene, geo)
 
 
-def _first_writes(scene: Scene) -> dict[str, int]:
+def _draw_order(scene: Scene) -> dict[str, int]:
+    """Step at which each object enters the drawing order. A transform destination
+    is never added itself: the source keeps its place and takes its shape."""
     out: dict[str, int] = {}
     for st in scene.steps:
         if st.kind == "write":
             for t in st.targets:
                 out.setdefault(t, st.index)
+        elif st.kind == "transform" and st.to and st.targets:
+            out.setdefault(st.to, out.get(st.targets[0], st.index))
     return out
 
 
@@ -727,13 +753,15 @@ def _covered_by_fill(scene: Scene, geo: Geometry, a: Obj, b: Obj) -> tuple[str, 
     fill, txt = (a, b) if a.kind in ("area", "riemann") else (b, a)
     if txt.kind not in TEXTLIKE or not geo.measured:
         return None
-    order = _first_writes(scene)
+    order = _draw_order(scene)
     if order.get(fill.id, 0) < order.get(txt.id, 0):
         return None  # the label is on top
     fb, tb = geo.bbox(fill.id), geo.bbox(txt.id)
     if not fb or not tb:
         return None
-    ov = fb.overlap_area(tb) / tb.area
+    ov = geo.fill_cover(fill.id, tb)
+    if ov is None:
+        ov = fb.overlap_area(tb) / tb.area
     if ov >= 0.25:
         return ("warning", f"'{txt.id}' is painted over by the fill '{fill.id}' (written after it, "
                            f"covering ~{ov * 100:.0f}% of it; measured)")

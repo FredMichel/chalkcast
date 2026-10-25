@@ -213,19 +213,23 @@ class Scene:
         """Timeline length: a with_previous step runs inside the previous play, whose
         length is its longest animation (matches codegen's grouping). With ``fps``,
         each play/wait lasts a whole number of frames, rounded up as Manim does."""
-        groups: list[float] = []
+        groups: list[tuple[float, bool]] = []  # (seconds, is a play)
         open_play = False
         for s in self.steps:
             if s.with_previous and s.kind != "wait" and open_play:
-                groups[-1] = max(groups[-1], s.duration)
+                groups[-1] = (max(groups[-1][0], s.duration), True)
             else:
-                groups.append(s.duration)
+                groups.append((s.duration, s.kind != "wait"))
                 open_play = s.kind != "wait"
         if self.steps and self.steps[-1].kind != "wait":
-            groups.append(0.5)  # codegen.END_HOLD: the final state is held, not cut mid-animation
-        if fps:
-            groups = [math.ceil(g * fps - 1e-9) / fps for g in groups]
-        return round(sum(groups), 6) or 1.0
+            groups.append((0.5, False))  # codegen.END_HOLD: a (static) wait on the final state
+        if not fps:
+            return round(sum(g for g, _ in groups), 6) or 1.0
+        # Manim's own frame counts: a play renders len(arange(0, t, 1/fps)) frames, a
+        # static wait int(t / (1/fps)) (floating point included: 0.3 s at 10 fps is 2)
+        dt = 1 / fps
+        n = sum(math.ceil(g / dt) if play else int(g / dt) for g, play in groups)
+        return round(n / fps, 6) or 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {

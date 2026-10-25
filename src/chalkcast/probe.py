@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import traceback
 from typing import Any
@@ -137,6 +138,20 @@ def _domain(ax: Any, f: Any) -> tuple[float, float]:
     fin = np.isfinite(ys)
     outside = fin & ((ys < y0 - margin) | (ys > y1 + margin))
     return float(outside.mean()), float(fin.mean())
+
+
+def _fill_polygons(m: Any) -> list[list[list[float]]]:
+    """The filled regions of an area / Riemann sum as polygons (one per closed
+    subpath): its bounding box also covers the empty corners beside a curve."""
+    out = []
+    for leaf in m.family_members_with_points():
+        if leaf.get_fill_opacity() <= 0:
+            continue
+        for sub in leaf.get_subpaths():
+            anchors = list(sub[::4]) + [sub[-1]]
+            step = max(1, len(anchors) // 300)
+            out.append([[float(p[0]), float(p[1])] for p in anchors[::step]])
+    return out
 
 
 def _path_samples(m: Any, per_leaf: int = 24) -> list[list[float]]:
@@ -263,6 +278,7 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
     objects: dict[str, Any] = {}
     plots: dict[str, Any] = {}
     ink: dict[str, Any] = {}
+    fills: dict[str, Any] = {}
     for o in spec["objects"]:
         oid, kind = o["id"], o["kind"]
         m = ns.get(oid)
@@ -271,7 +287,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
         for mob in m.get_family():  # settle updaters (anchored shapes, redraws)
             mob.update(0)
         objects[oid] = {"kind": kind, "bbox": _bbox(m)}
-        if kind == "equation":
+        # only dots (\cdots, \ldots): there is no letter to compare with
+        if kind == "equation" and re.sub(r"\\[lcv]?dots|\\cdot|[.,\s{}]", "", o.get("tex") or ""):
             objects[oid]["glyph_pt"] = _smallest_glyph_pt(m)
         if kind == "plot":
             ax = ns[f"{oid}_ax"]
@@ -294,6 +311,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
                           (_path_samples(labels) if labels else [])}
         elif kind == "shape":
             ink[oid] = _ink(m, kind)
+        elif kind in ("area", "riemann"):
+            fills[oid] = _fill_polygons(m)
 
     latex_errors = _latex_errors(spec)
     if latex_errors:
@@ -336,7 +355,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
             states.append({"step": st["step"], "params": st["params"], "frac": st.get("frac", 1.0),
                            "objects": boxes,
                            "ink": ink_at, "curves": curves_at, "beat_end": st.get("beat_end", False)})
-    return {"ok": True, "objects": objects, "plots": plots, "ink": ink, "states": states}
+    return {"ok": True, "objects": objects, "plots": plots, "ink": ink, "states": states,
+            "fills": fills}
 
 
 def main(argv: list[str]) -> int:
