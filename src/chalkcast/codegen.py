@@ -123,6 +123,12 @@ def _cc_plot(ax, f, color, smooth=None, dx=None, clip=True):
             j += 1
         if j > i:
             a, b = float(xs[i]), float(xs[j])
+            # next to an undefined sample (e.g. sqrt(1-x**2) past x=1) the curve would
+            # stop one grid step short: bisect to the edge of the domain
+            if i > 0 and not fin[i - 1]:
+                a = _cc_edge(f, float(xs[i - 1]), a)
+            if j + 1 < n and not fin[j + 1]:
+                b = _cc_edge(f, float(xs[j + 1]), b)
             step = min(dx, (b - a) / 2.0)
             pieces.append(ax.plot(f, x_range=[a, b, step], color=color,
                                   use_smoothing=bool(smooth)))
@@ -130,6 +136,22 @@ def _cc_plot(ax, f, color, smooth=None, dx=None, clip=True):
     if len(pieces) == 1:
         return pieces[0]
     return VGroup(*pieces)
+
+
+def _cc_edge(f, bad, good):
+    """The point nearest ``bad`` (undefined) where f is still defined, from ``good``."""
+    for _ in range(40):
+        mid = (bad + good) / 2.0
+        with np.errstate(all="ignore"):
+            try:
+                v = float(f(mid))
+            except Exception:
+                v = float("nan")
+        if np.isfinite(v):
+            good = mid
+        else:
+            bad = mid
+    return good
 
 
 def _cc_helper_graph(ax, f, a, b):

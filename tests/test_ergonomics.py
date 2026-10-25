@@ -998,3 +998,97 @@ def test_inside_pads_by_half_a_stroke():
     from chalkcast.verify import _inside
     box = BBox(cx=4.5, cy=1.5, width=2.0, height=0.6)  # left edge at 3.5
     assert _inside([3.49, 1.5], box)
+
+
+# ---- eleventh audit -------------------------------------------------------------
+
+# K1. zooming in on a detail during a tween crops by design
+def test_zoom_in_during_tween_is_not_an_error(scene):
+    srv.add_parameter("w", 2)
+    p = _id(srv.add_plot(functions=["cos(w*x)"], x_range=[0, 10], width=10))
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="w", value=6, duration=2)
+    srv.add_step("camera_move", zoom=2, focus_x=-3, focus_y=0, with_previous=True)
+    srv.add_step("camera_move", zoom=1)
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o["lane"] == "framing" and o["severity"] == "error"]
+
+
+# K2. a swap within one beat has no in-between state
+def test_swap_in_one_beat_is_not_a_collision(scene):
+    a, b = _id(srv.add_text("3", x=-3)), _id(srv.add_text("1", x=-1))
+    a2, b2 = _id(srv.add_text("3", x=-1)), _id(srv.add_text("1", x=-3))
+    srv.add_step("write", targets=[a, b])
+    srv.add_step("transform", targets=[a], to=a2)
+    srv.add_step("transform", targets=[b], to=b2, with_previous=True)
+    assert not [o for o in inspect_scene(scene)["obligations"] if o["lane"] == "collision"]
+
+
+# K3. a crossfade gives the same verdict in either step order
+@pytest.mark.parametrize("fade_first", [True, False])
+def test_crossfade_order_does_not_matter(scene, fade_first):
+    n1, n2 = _id(srv.add_text("factor", y=-1.2)), _id(srv.add_text("simplify", y=-1.2))
+    srv.add_step("write", targets=[n1])
+    first, second = (("fade", n1), ("write", n2)) if fade_first else (("write", n2), ("fade", n1))
+    srv.add_step(first[0], targets=[first[1]])
+    srv.add_step(second[0], targets=[second[1]], with_previous=True)
+    assert not [o for o in inspect_scene(scene)["obligations"] if o["lane"] == "collision"]
+
+
+# K4. fading an already-faded object is an error
+def test_fade_of_faded_object(scene):
+    a, b = _id(srv.add_text("Step one", y=1)), _id(srv.add_text("Step two", y=-1))
+    srv.add_step("write", targets=[a, b])
+    srv.add_step("fade", targets=[a])
+    srv.add_step("wait")
+    srv.add_step("fade", targets=[a, b])
+    assert any("already faded" in o["summary"] for o in _lanes(scene))
+
+
+# K5. overlays stay on a plot's old shape after it is transformed
+def test_overlay_after_plot_transform(scene):
+    p1 = _id(srv.add_plot(functions=["x**2"], x_range=[0, 2], y_range=[0, 4]))
+    p2 = _id(srv.add_plot(functions=["x**3"], x_range=[0, 2], y_range=[0, 8]))
+    ar = _id(srv.add_area(p1, 0, 1.5))
+    srv.add_step("write", targets=[p1])
+    srv.add_step("write", targets=[ar])
+    srv.add_step("transform", targets=[p1], to=p2)
+    assert any(o["target"] == ar and "transformed" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# K6. a dot sweeping across a small label between samples is caught
+def test_swept_dot_path_crosses_label(scene):
+    srv.add_parameter("t", -5)
+    p = _id(srv.add_plot(functions=["0*x"], x_range=[-5, 5], y_range=[-2.5, 2.5], width=8, height=5))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="1.25"))
+    e = _id(srv.add_equation("P", x=0.5, y=1.25, scale=0.7))
+    srv.add_step("write", targets=[p, d, e])
+    srv.add_step("tween", param="t", value=5, duration=4)
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" and o["target"] == e for o in r["obligations"])
+
+
+# K7. fills that barely tint the board are flagged; closed ±sqrt curves reach their edges
+def test_fill_contrast(scene):
+    p = _id(srv.add_plot(functions=["x"], x_range=[0, 2], y_range=[0, 2]))
+    rr = _id(srv.add_riemann(p, 0, 2, dx=0.5, color="WHITE"))
+    srv.add_step("write", targets=[p, rr])
+    obls = inspect_scene(scene, theme_name="whiteboard")["obligations"]
+    assert any(o["target"] == rr and "barely shows" in o["summary"] for o in obls)
+
+
+def test_sqrt_curve_reaches_domain_edge():
+    pytest.importorskip("manim")
+    from chalkcast import codegen
+    ns: dict = {}
+    exec(codegen._PRELUDE, ns)
+    ax = ns["Axes"](x_range=[-1.5, 1.5, 0.5], y_range=[-1.5, 1.5, 0.5])
+    g = ns["_cc_plot"](ax, lambda x: ns["np"].sqrt(1 - x * x), ns["WHITE"])
+    xs = [ax.point_to_coords(p)[0] for p in g.get_all_points()]
+    assert min(xs) < -0.9999 and max(xs) > 0.9999
+
+
+def test_scene_without_steps_still_measures(scene):
+    _id(srv.add_text("NO STEPS"))
+    r = _measured(scene)
+    assert any("no steps" in o["summary"] for o in r["obligations"])

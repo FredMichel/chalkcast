@@ -461,28 +461,56 @@ def smooth(t: float, inflection: float = 10.0) -> float:
     return min(max((sig(inflection * (t - 0.5)) - err) / (1 - 2 * err), 0.0), 1.0)
 
 
+def _base_views(scene: Scene) -> dict[int, tuple[BBox, BBox]]:
+    """Before/after each step, the last camera frame that was not zoomed in.
+    Zooming in on a detail is meant to crop the rest; what it crops is judged in
+    the frame the scene zoomed in from."""
+    cams, base, out = camera_by_step(scene), DEFAULT_VIEW, {}
+    for st in scene.steps:
+        before = base
+        after = cams[st.index][1]
+        if after.width >= FRAME_WIDTH - 1e-9:
+            base = after
+        out[st.index] = (before, base)
+    return out
+
+
+def _judge(box: BBox, view: BBox, base: BBox) -> tuple[float, BBox]:
+    """(overflow, frame it is judged in). A box partly inside a zoomed-in view is
+    cropped by design: it is judged in the base frame instead. One entirely
+    outside it is not seen at all at that moment."""
+    zoomed_in = view.width < base.width - 1e-9
+    seen = (box.left < view.right and box.right > view.left and
+            box.bottom < view.top and box.top > view.bottom)
+    here = (overflow(box, view), view)
+    if zoomed_in and seen:
+        return min(here, (overflow(box, base), base), key=lambda t: t[0])
+    return here
+
+
 def _lerp_view(a: BBox, b: BBox, f: float) -> BBox:
     return BBox(cx=a.cx + (b.cx - a.cx) * f, cy=a.cy + (b.cy - a.cy) * f,
                 width=a.width + (b.width - a.width) * f, height=a.height + (b.height - a.height) * f)
 
 
 def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
-                     seen: list[tuple[int, BBox]]) -> list[tuple[BBox, list[BBox]]]:
+                     seen: list[tuple[int, BBox]]) -> list[tuple[BBox, list[tuple[BBox, BBox]]]]:
     """Each measured box of ``oid`` with the camera frames it is on screen under:
     its first state under the views of the steps before any tween (all its steps if
     it never moves); a tween frame under the camera at that moment (a camera_move
     in the same beat is interpolated); where a tween lands, under the views of
-    the steps until the next tween."""
+    the steps until the next tween. Each view comes with its base frame."""
     steps = {i for i, _ in seen}
-    end_view = dict(seen)
+    bases = _base_views(scene)
+    end_view = {i: (v, bases.get(i, (DEFAULT_VIEW, DEFAULT_VIEW))[1]) for i, v in seen}  # 0: no steps
     obj = scene.get_obj(oid)
     dynamic = obj is not None and is_dynamic(obj, scene)
     initial, states = geo.states_while(oid, steps)
-    out: list[tuple[BBox, list[BBox]]] = []
+    out: list[tuple[BBox, list[tuple[BBox, BBox]]]] = []
     box = geo.bbox(oid)
     if initial and box:
         init_steps = steps & initial_window(scene) if dynamic and scene.steps else steps
-        out.append((box, [end_view[i] for i in sorted(init_steps)] or [DEFAULT_VIEW]))
+        out.append((box, [end_view[i] for i in sorted(init_steps)] or [(DEFAULT_VIEW, DEFAULT_VIEW)]))
     windows, cams = _beat_windows(scene), camera_by_step(scene)
     by_index = {s.index: s for s in scene.steps}
     for st in states:
@@ -490,7 +518,7 @@ def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
         if not b:
             continue
         during, after = windows.get(int(st.get("step", 0)), ([], []))
-        views: list[BBox] = []
+        views: list[tuple[BBox, BBox]] = []
         if any(i in steps for i in during):
             cam = [by_index[i] for i in during if by_index[i].kind == "camera_move" and by_index[i].to]
             if cam:
@@ -498,7 +526,8 @@ def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
                 c = cam[-1]
                 # frac is the time fraction of the beat; the camera eases over its own run_time
                 f = smooth(min(1.0, float(st.get("frac", 1.0)) * tween_t / max(c.duration, 1e-9)))
-                views.append(_lerp_view(cams[during[0]][0], cams[c.index][1], f))
+                views.append((_lerp_view(cams[during[0]][0], cams[c.index][1], f),
+                              bases[during[0]][0]))
             else:
                 views += [end_view[i] for i in during if i in steps]
         if st.get("beat_end"):
@@ -567,9 +596,9 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         # every measured position must be fully seen at some moment it is shown
         over, best = None, DEFAULT_VIEW
         for b, vs in _framing_entries(scene, geo, oid, seen):
-            v = min(vs, key=lambda v: overflow(b, v))
-            if over is None or overflow(b, v) > over:
-                over, best = overflow(b, v), v
+            o, v = min((_judge(b, view, base) for view, base in vs), key=lambda t: t[0])
+            if over is None or o > over:
+                over, best = o, v
         if over is None:
             continue
         if over > OFFSCREEN_TOLERANCE:
@@ -658,7 +687,13 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         for oid, g in st.items():
             if oid != g:
                 shown_as.setdefault(g, set()).add(oid)
+    # one play() per beat: what is on screen together is the state after the beat,
+    # not after each of its steps (a swap or a crossfade has no in-between state)
+    ends = {s.index for n, s in enumerate(scene.steps)
+            if n + 1 == len(scene.steps) or not scene.steps[n + 1].with_previous}
     for n, st in enumerate(states, 1):
+        if scene.steps and n not in ends:
+            continue
         geoms = list(dict.fromkeys(st.values()))
         for i in range(len(geoms)):
             for j in range(i + 1, len(geoms)):
@@ -707,7 +742,65 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                                     f"of step {start} (measured)",
                                     "move the label out of the path, or limit the tween's range",
                                     target=tid, other=mover, step=start))
+    # between two samples a moving shape sweeps a segment: a small label can sit
+    # between them (samples land ~1 unit apart on a fast tween)
+    by_beat: dict[int, list[dict[str, Any]]] = {}
+    for st in geo.states:
+        by_beat.setdefault(int(st.get("step", 0)), []).append(st)
+    prev_boxes: dict[str, BBox] = {}
+    for start in sorted(by_beat):
+        during, _after = windows.get(start, ([], []))
+        shown_with: dict[str, set[str]] = {}
+        for i in during:
+            if 0 < i <= len(tl):
+                for g in tl[i - 1].values():
+                    shown_with.setdefault(g, set()).update(tl[i - 1].values())
+        for mover in {m for st in by_beat[start] for m in st["objects"]}:
+            mobj = scene.get_obj(mover)
+            if mobj is None or mobj.kind != "shape" or mover not in shown_with:
+                continue
+            path = [prev_boxes.get(mover) or geo.bbox(mover)]
+            path += [geo._box(st["objects"].get(mover)) for st in by_beat[start]]
+            path = [b for b in path if b]
+            if path:
+                prev_boxes[mover] = path[-1]
+            for tid in shown_with[mover]:
+                tobj = scene.get_obj(tid)
+                if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in crossed:
+                    continue
+                tbox = geo.bbox(tid)
+                if tbox is None:
+                    continue
+                for p, q in zip(path, path[1:]):
+                    pad = BBox(cx=tbox.cx, cy=tbox.cy, width=tbox.width + max(p.width, q.width),
+                               height=tbox.height + max(p.height, q.height))
+                    if _segment_hits(p.cx, p.cy, q.cx, q.cy, pad):
+                        crossed.add((tid, mover))
+                        out.append(_obl(scene.id, "collision", "warning",
+                                        f"'{tid}' is crossed by '{mover}' during the tween of step "
+                                        f"{start} (measured path)",
+                                        "move the label out of the path, or limit the tween's range",
+                                        target=tid, other=mover, step=start))
+                        break
     return out
+
+
+def _segment_hits(x0: float, y0: float, x1: float, y1: float, box: BBox) -> bool:
+    """Does the segment cross the box (Liang-Barsky)?"""
+    t0, t1, dx, dy = 0.0, 1.0, x1 - x0, y1 - y0
+    for p, q in ((-dx, x0 - box.left), (dx, box.right - x0), (-dy, y0 - box.bottom), (dy, box.top - y0)):
+        if abs(p) < 1e-12:
+            if q < 0:
+                return False
+            continue
+        r = q / p
+        if p < 0:
+            t0 = max(t0, r)
+        else:
+            t1 = min(t1, r)
+        if t0 > t1:
+            return False
+    return True
 
 
 def zoom_while_visible(scene: Scene) -> dict[str, float]:
@@ -744,10 +837,26 @@ def contrast(a: str, b: str) -> float | None:
     return (hi + 0.05) / (lo + 0.05)
 
 
+def _blend(color: str, bg: str, opacity: float) -> str:
+    """The color a translucent fill shows over the background."""
+    def rgb(c: str) -> list[int]:
+        h = _COLOR_HEX.get(c.upper(), c).lstrip("#")
+        h = "".join(ch * 2 for ch in h) if len(h) == 3 else h
+        return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+    try:
+        a, b = rgb(color), rgb(bg)
+    except ValueError:
+        return color
+    return "#" + "".join(f"{round(x * opacity + y * (1 - opacity)):02x}" for x, y in zip(a, b))
+
+
+MIN_FILL_CONTRAST = 1.1  # a translucent fill that barely tints the board
+
+
 def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
     """(what, color) for every color the author set on a stroked/text object."""
     if obj.kind in ("area", "riemann"):
-        return []  # translucent fills over the board, judged by their curve
+        return []  # translucent fills: see _fill_colors
     out = [(f"'{obj.id}'", obj.color)] if obj.color else []
     if obj.kind == "plot":
         for i, f in enumerate(obj.payload.get("functions", []), 1):
@@ -761,6 +870,15 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
     zoom = zoom_while_visible(scene)  # a zoomed-out camera shrinks everything on screen
     bg = theme(theme_name)["background_color"]
     for obj in scene.objects:
+        if obj.kind in ("area", "riemann") and obj.color:
+            op = float(obj.payload.get("opacity", 0.5)) if obj.kind == "area" else 0.6
+            c = contrast(_blend(obj.color, bg, op), bg)
+            if c is not None and c < MIN_FILL_CONTRAST:
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"fill of '{obj.id}' ({obj.color} at opacity {op}) barely shows on "
+                                f"the {theme_name} background (contrast {c:.2f}:1)",
+                                "pick a color that contrasts with the theme, or omit color",
+                                target=obj.id))
         for what, col in _explicit_colors(obj):
             c = contrast(col, bg)
             if c is not None and c < MIN_CONTRAST:
@@ -859,6 +977,11 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
                     out.append(_obl(scene.id, "timing", "error",
                                     f"step {step.index} ({step.kind}) targets '{tid}' before it is introduced",
                                     f"add a 'write' step for '{tid}' first", step=step.index))
+                elif tid in defined and tid not in on_screen and step.kind == "fade":
+                    out.append(_obl(scene.id, "timing", "error",
+                                    f"step {step.index} fades '{tid}', which is already faded out: "
+                                    "Manim shows it again at full opacity to fade it",
+                                    f"drop '{tid}' from this fade", step=step.index, target=tid))
                 elif tid in defined and tid not in on_screen and step.kind in ("highlight", "transform"):
                     out.append(_obl(scene.id, "timing", "error",
                                     f"step {step.index} ({step.kind}) targets '{tid}' after it was "
@@ -893,7 +1016,15 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
         for oid in st:
             o = scene.get_obj(st[oid])
             parent = (o.payload.get("plot") or (o.payload.get("anchor") or {}).get("plot")) if o else None
-            if parent and parent not in on and oid not in floating:
+            if parent and parent in st and st[parent] != parent and parent not in st.values() \
+                    and oid not in floating:
+                floating.add(oid)
+                out.append(_obl(scene.id, "timing", "warning",
+                                f"'{oid}' is drawn on the axes and curve of '{parent}', but '{parent}' "
+                                f"now shows '{st[parent]}' (transformed): it no longer matches",
+                                f"fade '{oid}' before the transform, and add the overlay to "
+                                f"'{st[parent]}' instead", target=oid))
+            elif parent and parent not in on and oid not in floating:
                 floating.add(oid)
                 out.append(_obl(scene.id, "timing", "warning",
                                 f"'{oid}' is on screen without its plot '{parent}' (faded or not "
@@ -1047,7 +1178,8 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
     # one cause, one finding: a dot that leaves the frame has left its axes too
     off = {o.get("target") for o in obligations if o["lane"] == "framing" and o["severity"] == "error"}
     obligations = [o for o in obligations
-                   if not ("leaves the axes" in o["summary"] and o.get("target") in off)]
+                   if not ("leaves the axes" in o["summary"] and o.get("target") in off)
+                   and not ("(measured path)" in o["summary"] and o.get("other") in off)]
     errors = [o for o in obligations if o["severity"] == "error"]
     warnings = [o for o in obligations if o["severity"] == "warning"]
     score = max(0.0, 1.0 - 0.25 * len(errors) - 0.1 * len(warnings))
