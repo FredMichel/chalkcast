@@ -31,10 +31,10 @@ from . import render as rnd
 from . import session
 from .codegen import _KNOWN_COLORS
 from .envelope import err, ok
-from .expr import ExprError, compile_fn, validate
+from .expr import ExprError, validate
 from .fix import apply_fixes
 from .model import STEP_KINDS, Obj, Project, Scene
-from .verify import GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
+from .verify import overlay_error, GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
 
 mcp = _Server("chalkcast")
 
@@ -155,39 +155,8 @@ def _interval_error(plot: Obj, x_min: float, x_max: float) -> str | None:
 
 def _overlay_error(scene: Scene, plot: Obj, fn_index: int, x_min: float, x_max: float,
                    kind: str) -> str | None:
-    """An area/Riemann sum only shows its integral if the x-axis (y = 0) is on the
-    axes and the function stays inside y_range over the interval."""
-    import numpy as np
-    y0, y1 = (float(v) for v in plot.payload.get("y_range", [-3, 3])[:2])
-    if not y0 <= 0 <= y1:
-        return (f"the {kind} is measured from y = 0, which is outside the y_range [{y0}, {y1}] "
-                f"of '{plot.id}'; include 0 in y_range")
-    fns = plot.payload.get("functions", [])
-    if not 1 <= fn_index <= len(fns):
-        return None
-    fn = fns[fn_index - 1]
-    f = compile_fn(str(fn["expr"] if isinstance(fn, dict) else fn), scene.params)
-    xs = np.linspace(x_min, x_max, 401)
-    with np.errstate(all="ignore"):
-        ys = []
-        for v in xs:
-            try:
-                ys.append(float(f(v, **scene.params)))
-            except Exception:  # noqa: BLE001 - outside the domain
-                ys.append(float("nan"))
-    ys = np.asarray(ys)
-    fin = ys[np.isfinite(ys)]
-    if fin.size == 0:
-        return f"function {fn_index} of '{plot.id}' is undefined on [{x_min}, {x_max}]"
-    if fin.size < ys.size:
-        return (f"function {fn_index} of '{plot.id}' is undefined on part of [{x_min}, {x_max}]; "
-                "restrict the interval to where it is defined")
-    margin = 0.005 * (y1 - y0)
-    if fin.min() < y0 - margin or fin.max() > y1 + margin:
-        return (f"function {fn_index} of '{plot.id}' leaves y_range [{y0}, {y1}] on "
-                f"[{x_min}, {x_max}] (it reaches {fin.min():.3g}..{fin.max():.3g}), so the {kind} "
-                "would be clipped; widen y_range or narrow the interval")
-    return None
+    """At the parameters' current values (verification re-checks every tween state)."""
+    return overlay_error(scene, plot, fn_index, x_min, x_max, kind, scene.params)
 
 
 def _anchor_error(expr: str, axis: str) -> str | None:
@@ -253,7 +222,10 @@ def inspect_project(project_id: str | None = None) -> dict[str, Any]:
                if _measured_at.get(f"{project.id}/{sc.id}") not in (None, _fingerprint(sc))}
     obls = [{**o, "stale": True} if o["scene"] in changed else o
             for o in project.obligations if o["status"] == "open"]
-    return ok(project.to_dict(), obligations=obls, coverage={"scope": project.id},
+    d = project.to_dict()
+    if "open_obligations" in d:
+        d["open_obligations"] = obls
+    return ok(d, obligations=obls, coverage={"scope": project.id},
               limitations=[f"scene(s) {sorted(changed)} changed since their last inspection: their "
                            "obligations are marked stale; call inspect_render again"] if changed else [])
 

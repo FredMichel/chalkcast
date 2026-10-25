@@ -18,13 +18,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .geometry import SAFE_MARGIN, FRAME_HEIGHT, FRAME_WIDTH, BBox
+from .geometry import BBox
 from .model import Scene
 from .verify import (DEFAULT_VIEW, MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline, view_margin,
-                     zoom_while_visible)
+                     visible_views, zoom_while_visible)
 
-_SAFE_L, _SAFE_R = -FRAME_WIDTH / 2 + SAFE_MARGIN, FRAME_WIDTH / 2 - SAFE_MARGIN
-_SAFE_B, _SAFE_T = -FRAME_HEIGHT / 2 + SAFE_MARGIN, FRAME_HEIGHT / 2 - SAFE_MARGIN
 
 
 def _safe_bounds(o: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -42,10 +40,6 @@ def _into(box: BBox, l: float, r: float, b: float, t: float) -> tuple[float, flo
 
 def _shift(box: BBox, dx: float, dy: float) -> BBox:
     return BBox(cx=box.cx + dx, cy=box.cy + dy, width=box.width, height=box.height)
-
-
-def _in_safe(box: BBox) -> bool:
-    return box.left >= _SAFE_L and box.right <= _SAFE_R and box.bottom >= _SAFE_B and box.top <= _SAFE_T
 
 
 def _co_visible(scene: Scene, oid: str) -> set[str]:
@@ -77,9 +71,14 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
             if b:
                 boxes.append(b)
 
+    # inside the camera view the label is written in (not the default frame)
+    view = next(iter(visible_views(scene).get(oid, [])), (0, DEFAULT_VIEW))[1]
+    m = view_margin(view)
+    sl, sr, sb, st_ = view.left + m, view.right - m, view.bottom + m, view.top - m
+
     def free(b: BBox) -> bool:
         pad = 0.08
-        if not _in_safe(b):
+        if not (b.left >= sl and b.right <= sr and b.bottom >= sb and b.top <= st_):
             return False
         if any(b.left - pad <= p[0] <= b.right + pad and b.bottom - pad <= p[1] <= b.top + pad for p in pts):
             return False

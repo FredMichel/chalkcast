@@ -700,3 +700,85 @@ def test_inspect_project_marks_stale_and_decodes_camera(scene):
     assert r["obligations"] and all(o.get("stale") for o in r["obligations"])
     cam = r["result"]["scenes"][0]["steps"][0]
     assert cam["zoom"] == 2.0 and cam["focus"] is None
+
+
+# ---- seventh audit --------------------------------------------------------------
+
+# F1a. a dot first shown after a tween is judged where the tween left it
+def test_dot_shown_after_tween_not_framed_at_start(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["0*x"], x_range=[-5, 5], y_range=[-3, 3]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t-30", at_y="0"))
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="t", value=30)
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o["severity"] == "error"]
+
+
+# F1b. a curve first shown once it is defined, or undefined only after its fade
+@pytest.mark.parametrize("order", ["write_after", "fade_before"])
+def test_curve_state_only_while_shown(scene, order):
+    srv.add_parameter("a", 10 if order == "write_after" else 0)
+    p = _id(srv.add_plot(functions=["sqrt(x - a)"], x_range=[0, 5], y_range=[0, 3]))
+    t = _id(srv.add_text("Title", y=3.3))
+    srv.add_step("write", targets=[t])
+    if order == "write_after":
+        srv.add_step("tween", param="a", value=0)
+        srv.add_step("write", targets=[p])
+    else:
+        srv.add_step("write", targets=[p])
+        srv.add_step("fade", targets=[p])
+        srv.add_step("tween", param="a", value=10)
+    r = _measured(scene)
+    assert not any("draws nothing" in o["summary"] for o in r["obligations"])
+
+
+# F1c. no collision with where a curve was before either object is shown
+def test_no_collision_with_unseen_initial_curve(scene):
+    srv.add_parameter("a", 1)
+    p = _id(srv.add_plot(functions=["0.3*sin(x)+a"], x_range=[-5, 5], y_range=[-3, 3]))
+    t = _id(srv.add_text("label", x=2.5, y=0.83, font_size=28))
+    srv.add_step("tween", param="a", value=-2)
+    srv.add_step("write", targets=[p, t])
+    r = _measured(scene)
+    assert not any(o["lane"] == "collision" for o in r["obligations"])
+
+
+# F2. collision repair searches inside the camera view
+def test_free_spot_inside_camera_view(scene):
+    a = _id(srv.add_text("first label", x=14, y=0))
+    b = _id(srv.add_text("second label", x=14, y=0.1))
+    srv.add_step("camera_move", zoom=2, focus_x=14, focus_y=0)
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[b])
+    pytest.importorskip("manim")
+    r = srv.fix_scene(max_rounds=1)
+    moved = [c for c in r["result"]["changes"] if c["lane"] == "collision"]
+    assert moved and all(14 - 3.6 < c["position"][0] < 14 + 3.6 for c in moved)
+
+
+# F3. an area pushed off its axes by a redeclared parameter or a tween is an error
+@pytest.mark.parametrize("how", ["redeclare", "tween"])
+def test_area_rechecked_at_parameter_states(scene, how):
+    srv.add_parameter("a", 0.5)
+    p = _id(srv.add_plot(functions=["a*x**2"], x_range=[-3, 3], y_range=[0, 4]))
+    ar = _id(srv.add_area(p, 0, 2))
+    srv.add_step("write", targets=[p, ar])
+    if how == "redeclare":
+        srv.add_parameter("a", 5)
+    else:
+        srv.add_step("tween", param="a", value=3)
+    obls = inspect_scene(scene)["obligations"]
+    assert any(o["target"] == ar and "integral" in o["summary"] for o in obls
+               if o["severity"] == "error")
+
+
+# F4. both copies of the open obligations carry the stale flag
+def test_stale_flag_in_both_copies(scene):
+    t = _id(srv.add_text("far", x=10))
+    srv.add_step("write", targets=[t])
+    srv.inspect_render()
+    srv.update_object(t, x=0)
+    r = srv.inspect_project()
+    assert all(o.get("stale") for o in r["result"]["open_obligations"])

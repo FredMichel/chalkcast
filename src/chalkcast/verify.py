@@ -24,6 +24,7 @@ from typing import Any
 
 from .geometry import FRAME_HEIGHT, FRAME_WIDTH, SAFE_MARGIN, BBox
 from .codegen import _COLOR_HEX, plot_is_dynamic, uses_params
+from .expr import compile_fn
 from .model import Obj, Scene
 from .themes import DEFAULT_THEME, theme
 
@@ -90,26 +91,44 @@ class Geometry:
         obj = self.scene.get_obj(oid)
         return obj.estimate_bbox() if obj else None
 
-    def boxes_while(self, oid: str, steps: set[int]) -> list[BBox]:
-        """Initial box plus the box at every tween state measured while ``oid`` is
-        on screen (``steps``): a faded dot may move off-screen unseen."""
-        out = [b for b in [self.bbox(oid)] if b]
+    def states_while(self, oid: str, steps: set[int]) -> tuple[bool, list[dict[str, Any]]]:
+        """Which measured states of ``oid`` are ever on screen, given the steps it is
+        shown at: (its state at the declared parameter values?, tween states).
+
+        The declared values hold until the first tween beat; a tween's in-between
+        states during its beat; where it lands, until the next tween. A dot written
+        only after a tween is never seen where it started, and a faded one may move
+        off-screen unseen."""
+        obj = self.scene.get_obj(oid)
+        dynamic = obj is not None and is_dynamic(obj, self.scene)
+        initial = not dynamic or not self.scene.steps or bool(steps & initial_window(self.scene))
+        windows = _beat_windows(self.scene)
+        seen = []
         for st in self._states:
-            if int(st.get("step", 0)) in steps:
-                b = self._box(st["objects"].get(oid))
-                if b:
-                    out.append(b)
+            during, after = windows.get(int(st.get("step", 0)), ([], []))
+            if steps & (set(during) | (set(after) if st.get("beat_end") else set())):
+                seen.append(st)
+        return initial, seen
+
+    def boxes_while(self, oid: str, steps: set[int]) -> list[BBox]:
+        """Every measured box of ``oid`` that is on screen at some point."""
+        initial, states = self.states_while(oid, steps)
+        out = [b for b in [self.bbox(oid)] if b] if initial else []
+        for st in states:
+            b = self._box(st["objects"].get(oid))
+            if b:
+                out.append(b)
         return out
 
     def undefined(self, oid: str, steps: set[int]) -> bool:
         """Measured with no finite point (e.g. a dot anchored at log(-2)) while shown."""
         if not self.measured:
             return False
+        initial, states = self.states_while(oid, steps)
         rec = self._objs.get(oid)
-        if rec is not None and rec.get("bbox") is None:
+        if initial and rec is not None and rec.get("bbox") is None:
             return True
-        return any(oid in st["objects"] and st["objects"][oid] is None
-                   for st in self._states if int(st.get("step", 0)) in steps)
+        return any(oid in st["objects"] and st["objects"][oid] is None for st in states)
 
     def moving_points(self, oid: str) -> list[list[float]]:
         """Every position a moving curve/shape takes during the tweens (measured)."""
@@ -254,6 +273,106 @@ def _beat_windows(scene: Scene) -> dict[int, tuple[list[int], list[int]]]:
     return out
 
 
+def initial_window(scene: Scene) -> set[int]:
+    """Steps played with every parameter at its declared value (before any tween)."""
+    out: set[int] = set()
+    for beat in _beats(scene):
+        if any(st.kind == "tween" for st in beat):
+            break
+        out |= {st.index for st in beat}
+    return out
+
+
+def param_moments(scene: Scene, samples: int = 8) -> list[tuple[dict[str, float], set[int]]]:
+    """Parameter values the timeline passes through, each with the steps during
+    which they are on screen: the declared values, then samples of every tween."""
+    vals = dict(scene.params)
+    out = [(dict(vals), initial_window(scene) if scene.steps else {0})]
+    windows = _beat_windows(scene)
+    for beat in _beats(scene):
+        tweens = [st for st in beat if st.kind == "tween"]
+        if not tweens:
+            continue
+        during, after = windows[tweens[0].index]
+        old = dict(vals)
+        for k in range(1, samples + 1):
+            v = dict(old)
+            for st in tweens:
+                if st.param in v and st.value is not None:
+                    v[st.param] = old[st.param] + (float(st.value) - old[st.param]) * k / samples
+            out.append((v, set(during) | (set(after) if k == samples else set())))
+            vals = v
+    return out
+
+
+def overlay_error(scene: Scene, plot: Obj, fn_index: int, x_min: float, x_max: float,
+                  kind: str, params: dict[str, float]) -> str | None:
+    """An area/Riemann sum only shows its integral if the x-axis (y = 0) is on the
+    axes and the function, at these parameter values, stays inside y_range over
+    the interval."""
+    import numpy as np
+    y0, y1 = (float(v) for v in plot.payload.get("y_range", [-3, 3])[:2])
+    if not y0 <= 0 <= y1:
+        return (f"the {kind} is measured from y = 0, which is outside the y_range [{y0}, {y1}] "
+                f"of '{plot.id}'; include 0 in y_range")
+    fns = plot.payload.get("functions", [])
+    if not 1 <= fn_index <= len(fns):
+        return None
+    fn = fns[fn_index - 1]
+    f = compile_fn(str(fn["expr"] if isinstance(fn, dict) else fn), params)
+    xs = np.linspace(x_min, x_max, 401)
+    with np.errstate(all="ignore"):
+        ys = []
+        for v in xs:
+            try:
+                ys.append(float(f(v, **params)))
+            except Exception:  # noqa: BLE001 - outside the domain
+                ys.append(float("nan"))
+    ys = np.asarray(ys)
+    fin = ys[np.isfinite(ys)]
+    if fin.size == 0:
+        return f"function {fn_index} of '{plot.id}' is undefined on [{x_min}, {x_max}]"
+    if fin.size < ys.size:
+        return (f"function {fn_index} of '{plot.id}' is undefined on part of [{x_min}, {x_max}]; "
+                "restrict the interval to where it is defined")
+    margin = 0.005 * (y1 - y0)
+    if fin.min() < y0 - margin or fin.max() > y1 + margin:
+        return (f"function {fn_index} of '{plot.id}' leaves y_range [{y0}, {y1}] on "
+                f"[{x_min}, {x_max}] (it reaches {fin.min():.3g}..{fin.max():.3g}), so the {kind} "
+                "would be clipped; widen y_range or narrow the interval")
+    return None
+
+
+def _lane_overlays(scene: Scene) -> list[dict[str, Any]]:
+    """Areas/Riemann sums re-checked at every parameter value they are shown at:
+    a redeclared parameter or a tween can push them into a state add_area refuses."""
+    out = []
+    vis = visible_views(scene)
+    moments = param_moments(scene)
+    for obj in scene.objects:
+        if obj.kind not in ("area", "riemann") or obj.id not in vis:
+            continue
+        plot = scene.get_obj(obj.payload.get("plot", ""))
+        if plot is None:
+            continue
+        steps = {i for i, _ in vis[obj.id]}
+        kind = "area" if obj.kind == "area" else "Riemann sum"
+        for vals, window in moments:
+            if not (window & steps):
+                continue
+            e = overlay_error(scene, plot, int(obj.payload.get("fn", 1)), float(obj.payload["x_min"]),
+                              float(obj.payload["x_max"]), kind, vals)
+            if e:
+                at = ", ".join(f"{k}={v:.3g}" for k, v in vals.items() if k in obj_params(obj, scene))
+                out.append(_obl(scene.id, "range", "error",
+                                f"{kind} '{obj.id}' no longer shows its integral"
+                                f"{f' at {at}' if at else ''}: {e}",
+                                "change the parameter's value/tween range, y_range or the interval",
+                                target=obj.id))
+                break
+    return out
+
+
 def unused_tweens(scene: Scene) -> list[int]:
     used = set().union(*(obj_params(o, scene) for o in scene.objects)) if scene.objects else set()
     return [st.index for st in scene.steps if st.kind == "tween" and st.param in scene.params
@@ -357,10 +476,15 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     return out
 
 
-def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj) -> tuple[str, str] | None:
-    """(severity, summary) if the two shown shapes genuinely collide, else None."""
+def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
+                  initial: bool = True) -> tuple[str, str] | None:
+    """(severity, summary) if the two shown shapes genuinely collide, else None.
+    ``initial``: whether they are on screen together at the declared parameter
+    values (geometry here is measured there; tween states are checked separately)."""
     if a.kind in ("area", "riemann") or b.kind in ("area", "riemann"):
         return None  # fills sit on their plot by design
+    if not initial and (is_dynamic(a, scene) or is_dynamic(b, scene)):
+        return None  # never together where the moving one started
     ka, kb = a.kind, b.kind
     ba, bb = geo.bbox(a.id), geo.bbox(b.id)
     if ba is None or bb is None:
@@ -410,23 +534,25 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj) -> tuple[str, str
 def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     out, seen = [], set()
     states = timeline(scene) if scene.steps else [{o.id: o.id for o in scene.objects}]
-    for st in states:
+    init = initial_window(scene) if scene.steps else {1}
+    together: dict[tuple[str, str], bool] = {}  # pair -> together at the declared values?
+    for n, st in enumerate(states, 1):
         geoms = list(dict.fromkeys(st.values()))
         for i in range(len(geoms)):
             for j in range(i + 1, len(geoms)):
                 key = tuple(sorted((geoms[i], geoms[j])))
-                if key in seen:
-                    continue
-                seen.add(key)
-                a, b = scene.get_obj(key[0]), scene.get_obj(key[1])
-                if a is None or b is None:
-                    continue
-                found = _pair_finding(scene, geo, a, b)
-                if found:
-                    sev, summary = found
-                    out.append(_obl(scene.id, "collision", sev, summary,
-                                    "move one of them, or stagger their steps so they are not "
-                                    "visible together", target=key[1], other=key[0]))
+                together[key] = together.get(key, False) or n in init
+    for key, initial in together.items():
+        seen.add(key)
+        a, b = scene.get_obj(key[0]), scene.get_obj(key[1])
+        if a is None or b is None:
+            continue
+        found = _pair_finding(scene, geo, a, b, initial)
+        if found:
+            sev, summary = found
+            out.append(_obl(scene.id, "collision", sev, summary,
+                            "move one of them, or stagger their steps so they are not "
+                            "visible together", target=key[1], other=key[0]))
     # moving curves/shapes: check every measured moment of every tween against what
     # is on screen during that beat -- and, for where the beat leaves them, against
     # everything shown until the next tween moves them again
@@ -640,13 +766,18 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
 
 def _lane_fidelity(scene: Scene, geo: Geometry) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     fid, rng = [], []
+    vis = visible_views(scene)
     for obj in scene.objects:
         if obj.kind != "plot":
             continue
-        # the curve as first drawn, then where each tween leaves it
-        states = [c for st in geo.states for c in st.get("curves", {}).get(obj.id, [])]
+        if scene.steps and obj.id not in vis:
+            continue  # never on screen (the timing lane says so)
+        # the curve as drawn while on screen: at the declared values and/or where tweens land
+        initial, seen = geo.states_while(obj.id, {i for i, _ in vis.get(obj.id, [(0, None)])})
+        states = [c for st in seen for c in st.get("curves", {}).get(obj.id, [])]
+        drawn = (list(geo.curves(obj.id)) if initial else []) + states
         worst: dict[int, dict[str, Any]] = {}
-        for c in list(geo.curves(obj.id)) + states:
+        for c in drawn:
             i = c.get("fn")
             w = worst.setdefault(i, dict(c))
             for key in ("max_error", "clipped_fraction"):
@@ -654,8 +785,7 @@ def _lane_fidelity(scene: Scene, geo: Geometry) -> tuple[list[dict[str, Any]], l
                     w[key] = c[key]
                     if key == "max_error":
                         w["at_x"] = c.get("at_x")
-        undefined = sorted({c.get("fn") for c in list(geo.curves(obj.id)) + states
-                            if c.get("defined_fraction") == 0.0})
+        undefined = sorted({c.get("fn") for c in drawn if c.get("defined_fraction") == 0.0})
         for i in undefined:
             rng.append(_obl(scene.id, "range", "error",
                             f"curve {i} of '{obj.id}' draws nothing: its function is undefined on "
@@ -726,12 +856,14 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
         obligations.extend(fn(scene, geo))
     lanes_run.append("timing")
     obligations.extend(_lane_timing(scene))
+    lanes_run.append("range")
+    obligations.extend(_lane_overlays(scene))
     if geo.measured:
-        lanes_run += ["fidelity", "range"]
+        lanes_run += ["fidelity"]
         fid, rng = _lane_fidelity(scene, geo)
         obligations += fid + rng
 
-    lanes_skipped = ["intent"] + ([] if geo.measured else ["fidelity", "range"]) + \
+    lanes_skipped = ["intent"] + ([] if geo.measured else ["fidelity"]) + \
         (["framing", "collision"] if compile_failed else [])
     if geo.measured:
         limitations = ["geometry measured from the constructed Manim objects (exact boxes "
@@ -741,7 +873,7 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
     else:
         limitations = ["bounding boxes are estimated from the scene graph, not measured; "
                        "framing/collision are approximate and capped at warnings",
-                       "fidelity/range lanes need Manim (geometry probe) and were skipped",
+                       "fidelity lane and curve clipping need Manim (geometry probe) and were skipped",
                        "shapes anchored to a plot are not placed in estimated geometry",
                        "intent lane (vision) is not available yet"]
 
