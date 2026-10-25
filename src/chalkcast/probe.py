@@ -28,6 +28,23 @@ import traceback
 from typing import Any
 
 
+_X_HEIGHT: list[float] = []
+
+
+def _smallest_glyph_pt(m) -> float | None:
+    """Point size of the smallest letter/digit of a MathTex: a nested fraction or a
+    sub-subscript is drawn far below the equation's nominal size. A glyph's height
+    is compared with an 'x' at 48pt; bars, minus signs and dots are not letters."""
+    from manim import MathTex
+    if not _X_HEIGHT:
+        _X_HEIGHT.append(MathTex("x").height)
+    hx = _X_HEIGHT[0]
+    hs = [g.height for g in m.family_members_with_points() if g.height >= 0.25 * g.width]
+    big = max(hs, default=0.0)
+    letters = [h for h in hs if h >= 0.3 * big]  # a dot is ~0.15 of a digit; a sub-subscript ~0.5
+    return round(48.0 * min(letters) / hx, 1) if letters and hx else None
+
+
 def _bbox(m: Any) -> list[float] | None:
     import numpy as np
 
@@ -254,6 +271,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
         for mob in m.get_family():  # settle updaters (anchored shapes, redraws)
             mob.update(0)
         objects[oid] = {"kind": kind, "bbox": _bbox(m)}
+        if kind == "equation":
+            objects[oid]["glyph_pt"] = _smallest_glyph_pt(m)
         if kind == "plot":
             ax = ns[f"{oid}_ax"]
             curves = []
@@ -266,7 +285,10 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
             # axis labels are ink a note must not sit on, like the axes themselves
             labels = ns.get(f"{oid}_labels")
             label_boxes = [b for b in (_bbox(lab) for lab in (labels or [])) if b]
+            number_boxes = [b for axis in ax.get_axes() for num in getattr(axis, "numbers", [])
+                            if (b := _bbox(num))]
             plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves, "label_boxes": label_boxes,
+                          "number_boxes": number_boxes,
                           # an axis line is one cubic segment: sample it every few hundredths
                           "axes_points": _path_samples(ax, per_leaf=400) +
                           (_path_samples(labels) if labels else [])}

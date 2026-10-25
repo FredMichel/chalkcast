@@ -1074,7 +1074,8 @@ def test_fill_contrast(scene):
     rr = _id(srv.add_riemann(p, 0, 2, dx=0.5, color="WHITE"))
     srv.add_step("write", targets=[p, rr])
     obls = inspect_scene(scene, theme_name="whiteboard")["obligations"]
-    assert any(o["target"] == rr and "barely shows" in o["summary"] for o in obls)
+    assert any(o["target"] == rr and ("barely shows" in o["summary"] or "erases" in o["summary"])
+               for o in obls)
 
 
 def test_sqrt_curve_reaches_domain_edge():
@@ -1454,3 +1455,99 @@ def test_idle_tween_named(scene):
     srv.add_step("tween", param="t", value=1)
     assert any("change nothing on screen" in o["summary"] and o["target"] == p
                for o in _lanes(scene, "warning"))
+
+
+# ---- seventeenth audit ------------------------------------------------------------
+
+# R1. tick steps finer than 0.001 get enough decimals
+def test_fine_tick_decimals(scene):
+    _id(srv.add_plot(functions=["0.0001*x**2"], x_range=[0, 3], y_range=[0, 0.001], show_numbers=True))
+    assert "'num_decimal_places': 4" in generate_module(scene, "chalkboard")
+
+
+# R2. math labels with macros are accepted; words are still refused
+def test_math_labels_with_macros(scene):
+    for lab in ("\\Delta t", "\\omega t", "\\cos x", "v \\cdot t", "\\ln x"):
+        assert srv.add_plot(functions=["x"], x_label=lab)["ok"], lab
+    assert srv.add_plot(functions=["x"], x_label="speed of light")["ok"] is False
+
+
+# R3. durations count whole frames at the project fps
+def test_duration_in_frames():
+    srv.open_project(fps=2)
+    srv.add_scene("t")
+    sc = session.get_project().get_scene(None)
+    ids = [_id(srv.add_text(f"t{i}", y=i - 3)) for i in range(3)]
+    assert srv.add_step("write", targets=[ids[0]], duration=0.3)["ok"] is False  # < 2 frames
+    for t in ids:
+        r = srv.add_step("write", targets=[t], duration=1.2)
+    assert r["result"]["scene_duration"] == pytest.approx(3 * 1.5 + 0.5)
+    assert sc.duration() == pytest.approx(3 * 1.2 + 0.5)
+
+
+# R4. the smallest symbols of an equation are measured
+def test_nested_fraction_glyphs(scene):
+    e = _id(srv.add_equation("\\frac{1}{1+\\frac{1}{1+\\frac{1}{x}}}", scale=0.45))
+    srv.add_step("write", targets=[e])
+    r = _measured(scene)
+    assert any("smallest symbols" in o["summary"] for o in r["obligations"])
+
+
+def test_normal_equation_glyphs_pass(scene):
+    e = _id(srv.add_equation("E = mc^2 + \\frac{1}{2}mv^2"))
+    srv.add_step("write", targets=[e])
+    r = _measured(scene)
+    assert not any("smallest symbols" in o["summary"] for o in r["obligations"])
+
+
+# R5. a curve through its own tick numbers (negative-only ranges)
+def test_curve_through_tick_numbers(scene):
+    p = _id(srv.add_plot(functions=["-(x+6)**2/4-1"], x_range=[-10, -2], y_range=[-5, -1],
+                         show_numbers=True))
+    srv.add_step("write", targets=[p])
+    r = _measured(scene)
+    assert any("tick numbers" in o["summary"] and "runs through" in o["summary"] for o in r["obligations"])
+
+
+# R6. fix_scene does not flip sampling back and forth across calls
+def test_fix_fidelity_settles(scene):
+    p = _id(srv.add_plot(functions=["log(x)"], x_range=[0.001, 10], y_range=[-7, 3], width=2, height=7))
+    srv.add_step("write", targets=[p])
+    pytest.importorskip("manim")
+    srv.fix_scene()
+    after1 = dict(scene.get_obj(p).payload["functions"][0])
+    r = srv.fix_scene()["result"]
+    assert scene.get_obj(p).payload["functions"][0] == after1
+    if any(o["lane"] == "fidelity" for o in r["needs_author"]):
+        assert any("finest sampling" in w for w in r["not_auto_fixable"])
+
+
+# R7. a plot colour that no curve would use is refused
+def test_plot_color_with_coloured_curves(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "x", "color": "RED"}, {"expr": "-x", "color": "#1d4ed8"}]))
+    assert srv.update_object(p, color="#f7f7f4")["ok"] is False
+    q = _id(srv.add_plot(functions=["x", "-x"], x=3))
+    r = srv.update_object(q, color="RED")
+    assert r["ok"] and any("all drawn in RED" in n for n in r["limitations"])
+
+
+# R8. an opaque fill in the background colour erases what is under it
+def test_background_fill_is_an_error():
+    srv.open_project(theme="whiteboard")
+    srv.add_scene("t")
+    sc = session.get_project().get_scene(None)
+    p = _id(srv.add_plot(functions=["x"]))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=2))
+    srv.update_object(a, color="#f7f7f4", opacity=0.9)
+    srv.add_step("write", targets=[p, a])
+    assert any("erases" in o["summary"] for o in inspect_scene(sc, theme_name="whiteboard")["obligations"]
+               if o["severity"] == "error")
+
+
+# R9. side-by-side labels with no space between them
+def test_labels_touching_without_gap(scene):
+    ids = [_id(srv.add_text(f"label 0{k}", x=-4.5 + 1.75 * k, font_size=40)) for k in range(4)]
+    srv.add_step("write", targets=ids)
+    r = _measured(scene)
+    assert any("no space between" in o["summary"] or "run into each other" in o["summary"]
+               for o in r["obligations"])

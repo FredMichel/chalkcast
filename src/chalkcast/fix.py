@@ -235,6 +235,13 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 unresolved.append(o)
                 continue
             fn = fns[i]
+            xr = obj.payload.get("x_range", [-5, 5])
+            finest = (float(xr[1]) - float(xr[0])) / 3000.0
+            if fn.get("smooth") is False and abs(float(fn.get("dx", 0)) - finest) < 1e-12:
+                unresolved.append({**o, "summary": f"'{oid}' curve {i + 1} already uses the finest "
+                                   "sampling fix_scene sets: the remaining error is the curve itself "
+                                   "(steep or near a pole at this range); narrow x_range or y_range"})
+                continue
             key = f"{oid}:{i}"
             stage = (attempts or {}).get(key, 0)
             if attempts is not None:

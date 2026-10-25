@@ -205,7 +205,7 @@ def render_scene(project: Project, scene: Scene, workdir: Path, *, single_frame:
 
     ext = "png" if single_frame else "mp4"
     artifact = _find_output(media_dir, ext)
-    frames = _sample_frames(artifact, workdir, scene.duration()) if (artifact and not single_frame) else (
+    frames = _sample_frames(artifact, workdir, scene.duration(project.fps)) if (artifact and not single_frame) else (
         [str(artifact)] if artifact else []
     )
     return {

@@ -341,7 +341,7 @@ def _define_plot(obj: Obj, ink: str, scene: Scene) -> list[str]:
         cfg = []
         for r in (x_range, y_range):
             step = float(r[2]) if len(r) > 2 else 1.0
-            d = next((k for k in range(4) if abs(step * 10 ** k - round(step * 10 ** k)) < 1e-9), 3)
+            d = next((k for k in range(7) if abs(step * 10 ** k - round(step * 10 ** k)) < 1e-9), 6)
             # no thousands separators (2,000 reads as a decimal in many locales)
             cfg.append("{'include_numbers': True, 'font_size': 24, 'decimal_number_config': "
                        f"{{'num_decimal_places': {d}, 'group_with_commas': False, "

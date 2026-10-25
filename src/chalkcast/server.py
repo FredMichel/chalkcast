@@ -152,7 +152,8 @@ def _label_error(label: str) -> str | None:
     if (e := _tex_specials(label)):
         return e
     bare = re.sub(r"\\(?:text|mathrm|textrm|mbox|operatorname)\{[^{}]*\}", "", label)
-    if re.search(r"[A-Za-z]{2,}\s+[A-Za-z(]", bare):
+    bare = re.sub(r"\\[A-Za-z]+", " ", bare)  # \Delta t, \cos x, v \cdot t are math, not words
+    if "\\" not in label and re.search(r"[A-Za-z]{2,}\s+[A-Za-z(]", bare):
         return (f"axis label {label!r} is LaTeX math, where spaces between words vanish; "
                 f"write it as \\text{{{label}}}")
     return None
@@ -620,13 +621,13 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
-    _, scene = got
+    project, scene = got
     if kind not in STEP_KINDS:
         return err(f"unknown step kind {kind!r}; use one of {', '.join(STEP_KINDS)}")
-    if duration < MIN_DURATION:
-        return err(f"duration {duration} s is too short to see (under {MIN_DURATION} s an "
-                   "animation is 1-2 frames, rounded up unpredictably); use at least "
-                   f"{MIN_DURATION}")
+    shortest = max(MIN_DURATION, round(2.0 / project.fps, 3))  # at least 2 frames
+    if duration < shortest:
+        return err(f"duration {duration} s is too short to see at {project.fps} fps (under "
+                   f"{shortest} s an animation is 1-2 frames, rounded up); use at least {shortest}")
     if duration > MAX_DURATION:
         return err(f"duration {duration} s is over {MAX_DURATION} s: durations are seconds, "
                    "not milliseconds; split a long beat into several steps")
@@ -683,7 +684,7 @@ def add_step(kind: str, targets: list[str] | None = None, to: str | None = None,
         scene.remove_step(step.index)
         return err(conflicts[0])
     res = {"scene_id": scene.id, "step_index": step.index, "kind": kind,
-           "with_previous": with_previous, "scene_duration": scene.duration()}
+           "with_previous": with_previous, "scene_duration": scene.duration(project.fps)}
     if kind == "tween" and step.index in unused_tweens(scene):
         res["warning"] = f"no object uses parameter '{param}' yet: this tween changes nothing on screen"
     return ok(res)
@@ -724,6 +725,16 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         return err(_unknown_object(object_id, scene, got[0]))
     if (ce := _color_error(color)):
         return err(ce)
+    notes: list[str] = []
+    if obj.kind == "plot" and color is not None:
+        fns = functions if functions is not None else obj.payload.get("functions", [])
+        plain = [i for i, f in enumerate(fns, 1) if not (isinstance(f, dict) and f.get("color"))]
+        if not plain:
+            return err("a plot's color is the default for curves without their own color, and "
+                       "every curve here has one: set functions[i].color instead")
+        if len(plain) > 1:
+            notes.append(f"curves {plain} are all drawn in {color}: give each its own color "
+                         "to tell them apart")
     p = dict(obj.payload)
     changed: list[str] = []
     shape = p.get("shape")
@@ -856,7 +867,7 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         obj.color = color
         changed.append("color")
     return ok({"scene_id": scene.id, "object_id": object_id, "changed": changed,
-               "object": obj.to_dict()})
+               "object": obj.to_dict()}, limitations=notes)
 
 
 @mcp.tool()
@@ -1100,12 +1111,20 @@ def export_gif(width: int = 640, fps: int = 15, scene_id: str | None = None,
                    obligations=blocking)
     if not 64 <= width <= 3840 or not 1 <= fps <= 60:
         return err("width must be in 64..3840 and fps in 1..60")
+    notes = []
+    src_w = {"low": 854, "medium": 1280, "high": 1920}.get(project.quality, width)
+    if fps > project.fps:
+        notes.append(f"fps {fps} capped at the render's {project.fps} (more would repeat frames)")
+        fps = project.fps
+    if width > src_w:
+        notes.append(f"width {width} capped at the render's {src_w} px (more would upscale)")
+        width = src_w
     res = rnd.export_gif(Path(report["artifact"]), session.workdir(project.id, scene.id),
                          width=width, fps=fps)
     if not res.get("ok"):
         return err(str(res.get("error")), limitations=[res.get("stderr_tail", "")])
     return ok({"scene_id": scene.id, "gif": res["artifact"], "width": width, "fps": fps},
-              artifacts=[res["artifact"]])
+              artifacts=[res["artifact"]], limitations=notes)
 
 
 # ---------------------------------------------------------------------------

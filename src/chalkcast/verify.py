@@ -124,6 +124,12 @@ class Geometry:
         """Every position a moving curve/shape takes during the tweens (measured)."""
         return [p for st in self._states for p in st.get("ink", {}).get(oid, [])]
 
+    def number_boxes(self, plot_id: str) -> list[BBox]:
+        return [b for b in (self._box(x) for x in self._plots.get(plot_id, {}).get("number_boxes", [])) if b]
+
+    def glyph_pt(self, oid: str) -> float | None:
+        return self._objs.get(oid, {}).get("glyph_pt")
+
     def label_boxes(self, plot_id: str) -> list[BBox]:
         return [b for b in (self._box(x) for x in self._plots.get(plot_id, {}).get("label_boxes", [])) if b]
 
@@ -773,6 +779,9 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if dx > 0.03 and dy > 0.6 * min(ba.height, bb.height) and ratio < MEASURED_TEXT_OVERLAP:
             return ("error", f"'{a.id}' and '{b.id}' run into each other on the same line "
                              f"({dx:.2f} units of overlap, measured)")
+        if -0.06 < dx <= 0.03 and dy > 0.6 * min(ba.height, bb.height) and ratio < MEASURED_TEXT_OVERLAP:
+            return ("warning", f"'{a.id}' and '{b.id}' touch on the same line with no space between "
+                               f"them ({-dx:.2f} units apart, measured): they read as one word")
         if ratio >= MEASURED_TEXT_OVERLAP:
             return ("error", f"'{a.id}' and '{b.id}' overlap (~{ratio * 100:.0f}% of the smaller, measured)")
         return None
@@ -874,9 +883,16 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         if obj.kind != "plot" or not geo.measured:
             continue
         lbs = geo.label_boxes(obj.id)
-        if not lbs:
+        if not lbs and not geo.number_boxes(obj.id):
             continue
         pts = [p for c in geo.curves(obj.id) for p in c.get("points", [])] + geo.moving_points(obj.id)
+        hit = [nb for nb in geo.number_boxes(obj.id)
+               if sum(_inside(p, nb, shrink=0.0) for p in pts) >= 2]
+        if hit:
+            out.append(_obl(scene.id, "collision", "warning",
+                            f"a curve of '{obj.id}' runs through {len(hit)} of its tick numbers "
+                            "(measured)", "change y_range/x_range so the axes sit clear of the "
+                            "curve (e.g. include 0), or drop show_numbers", target=obj.id))
         if any(_inside(p, lb, shrink=0.0) for lb in lbs for p in pts):
             out.append(_obl(scene.id, "collision", "error",
                             f"a curve of '{obj.id}' runs through its own axis label (measured)",
@@ -1008,6 +1024,9 @@ def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
     if obj.kind in ("area", "riemann"):
         return []  # translucent fills: see _fill_colors
     out = [(f"'{obj.id}'", obj.color)] if obj.color else []
+    if obj.kind == "plot" and obj.color and all(
+            isinstance(f, dict) and f.get("color") for f in obj.payload.get("functions", [])):
+        out = []  # every curve has its own colour: the plot colour draws nothing
     if obj.kind == "plot":
         for i, f in enumerate(obj.payload.get("functions", []), 1):
             if isinstance(f, dict) and f.get("color"):
@@ -1015,12 +1034,15 @@ def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
     return out
 
 
+MIN_GLYPH_SIZE = 12.0  # pt: a subscript is ~0.7 and a sub-subscript ~0.5 of the size
+
+
 def tick_decimals(step: float) -> int:
     """Decimals a tick step needs (1 -> 0, 0.25 -> 2)."""
-    for d in range(4):
+    for d in range(7):
         if abs(step * 10 ** d - round(step * 10 ** d)) < 1e-9:
             return d
-    return 3
+    return 6
 
 
 def _crowded_ticks(obj: Obj) -> str | None:
@@ -1050,7 +1072,13 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
         if obj.kind in ("area", "riemann") and obj.color:
             op = float(obj.payload.get("opacity", 0.5)) if obj.kind == "area" else 0.6
             c = contrast(_blend(obj.color, bg, op), bg)
-            if c is not None and c < MIN_FILL_CONTRAST:
+            if c is not None and c < MIN_FILL_CONTRAST and op >= 0.5:
+                out.append(_obl(scene.id, "legibility", "error",
+                                f"fill of '{obj.id}' ({obj.color} at opacity {op}) is the background "
+                                f"colour: it erases the curves and axes under it (contrast {c:.2f}:1)",
+                                "pick a color that contrasts with the theme, or omit color",
+                                target=obj.id))
+            elif c is not None and c < MIN_FILL_CONTRAST:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"fill of '{obj.id}' ({obj.color} at opacity {op}) barely shows on "
                                 f"the {theme_name} background (contrast {c:.2f}:1)",
@@ -1078,6 +1106,13 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"equation '{obj.id}' is too small to read (~{fs:.0f}pt)",
                                 "increase its scale", target=obj.id))
+            elif (g := geo.glyph_pt(obj.id)) is not None and g * z < MIN_GLYPH_SIZE:
+                # nested fractions, sub-subscripts: the smallest symbols, measured
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"the smallest symbols of equation '{obj.id}' render at ~{g * z:.0f}pt "
+                                f"(below {MIN_GLYPH_SIZE:.0f}pt; measured)",
+                                "increase its scale, or flatten nested fractions/scripts",
+                                target=obj.id))
         if obj.kind == "plot" and (obj.payload.get("x_label") or obj.payload.get("y_label")):
             fs = MATHTEX_FONT_SIZE * obj.scale * z
             if fs < MIN_FONT_SIZE:

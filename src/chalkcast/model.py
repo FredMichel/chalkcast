@@ -14,6 +14,7 @@ rough (font metrics are unknown pre-render) and callers surface that in
 from __future__ import annotations
 
 import itertools
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -208,20 +209,23 @@ class Scene:
         for i, s in enumerate(self.steps, start=1):
             s.index = i
 
-    def duration(self) -> float:
+    def duration(self, fps: int | None = None) -> float:
         """Timeline length: a with_previous step runs inside the previous play, whose
-        length is its longest animation (matches codegen's grouping)."""
-        total, group = 0.0, 0.0
+        length is its longest animation (matches codegen's grouping). With ``fps``,
+        each play/wait lasts a whole number of frames, rounded up as Manim does."""
+        groups: list[float] = []
+        open_play = False
         for s in self.steps:
-            if s.with_previous and s.kind != "wait" and group:
-                total += max(0.0, s.duration - group)
-                group = max(group, s.duration)
+            if s.with_previous and s.kind != "wait" and open_play:
+                groups[-1] = max(groups[-1], s.duration)
             else:
-                total += s.duration
-                group = 0.0 if s.kind == "wait" else s.duration
+                groups.append(s.duration)
+                open_play = s.kind != "wait"
         if self.steps and self.steps[-1].kind != "wait":
-            total += 0.5  # codegen.END_HOLD: the final state is held, not cut mid-animation
-        return total or 1.0
+            groups.append(0.5)  # codegen.END_HOLD: the final state is held, not cut mid-animation
+        if fps:
+            groups = [math.ceil(g * fps - 1e-9) / fps for g in groups]
+        return round(sum(groups), 6) or 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,6 +270,6 @@ class Project:
             "quality": self.quality,
             "fps": self.fps,
             "theme": self.theme,
-            "scenes": [s.to_dict() for s in self.scenes],
+            "scenes": [{**s.to_dict(), "duration": s.duration(self.fps)} for s in self.scenes],
             "open_obligations": [o for o in self.obligations if o["status"] == "open"],
         }
