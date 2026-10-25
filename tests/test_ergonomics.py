@@ -941,3 +941,60 @@ def test_area_refused_for_untweened_parameter(scene):
     srv.add_parameter("a", 5)
     p = _id(srv.add_plot(functions=["a*x**2"], y_range=[0, 4]))
     assert srv.add_area(p, 0, 2)["ok"] is False
+
+
+# ---- tenth audit ----------------------------------------------------------------
+
+# J1. two animations of one object (or two camera moves) in one beat are refused
+@pytest.mark.parametrize("second", ["highlight", "fade"])
+def test_two_animations_of_one_object_in_a_beat(scene, second):
+    t = _id(srv.add_text("Hello world"))
+    srv.add_step("write", targets=[t], duration=2)
+    r = srv.add_step(second, targets=[t], with_previous=True)
+    assert r["ok"] is False and "only the last" in r["error"]
+    assert len(scene.steps) == 1
+
+
+def test_two_camera_moves_in_a_beat(scene):
+    t = _id(srv.add_text("x"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("camera_move", zoom=2, focus_x=-4, focus_y=0)
+    r = srv.add_step("camera_move", zoom=3, with_previous=True)
+    assert r["ok"] is False and "camera" in r["error"]
+
+
+# J2. collision repair keeps the earlier label (the title) and leaves a gap
+def test_fix_moves_the_later_label(scene):
+    title = _id(srv.add_text("Chain rule", y=3.2, font_size=44))
+    eq = _id(srv.add_equation(r"\frac{d}{dx}\sin(x^2)=2x\cos(x^2)", y=2.7))
+    srv.add_step("write", targets=[title])
+    srv.add_step("write", targets=[eq])
+    pytest.importorskip("manim")
+    r = srv.fix_scene()
+    moved = {c["object"] for c in r["result"]["changes"] if c["lane"] == "collision"}
+    assert moved == {eq} and scene.get_obj(title).position == (0, 3.2)
+
+
+# J3. a curve undefined only where a tween lands says so
+def test_undefined_at_tween_landing_names_the_value(scene):
+    srv.add_parameter("h", 2)
+    p = _id(srv.add_plot(functions=["x**2/2", "((1+h)**2/2-0.5)/h*(x-1)+0.5"]))
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="h", value=0)
+    r = _measured(scene)
+    msg = [o for o in r["obligations"] if "draws nothing" in o["summary"]]
+    assert msg and "h=0" in msg[0]["summary"] and "tween" in msg[0]["suggested_fix"]
+
+
+# J4. the missing tick at an axis tip is stated, not implied by the echoed range
+def test_axis_max_tick_is_documented(scene):
+    r = srv.add_plot(functions=["x**2"], x_range=[0, 2], y_range=[0, 4], show_numbers=True)
+    assert any("x_max" in note for note in r["limitations"])
+
+
+# J5. a curve touching a label (within half a stroke) collides
+def test_inside_pads_by_half_a_stroke():
+    from chalkcast.geometry import BBox
+    from chalkcast.verify import _inside
+    box = BBox(cx=4.5, cy=1.5, width=2.0, height=0.6)  # left edge at 3.5
+    assert _inside([3.49, 1.5], box)

@@ -324,7 +324,9 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
     readable tick step (4-8 ticks, starting at min, or at 0 if 0 is inside the range);
     the result echoes the ranges used. Curves
     without a color get distinct colors suited to the theme. The axes are centred at
-    (x, y); labels hang off them. Without functions you get bare axes."""
+    (x, y); labels hang off them. Without functions you get bare axes. The axes end
+    in arrow tips at x_max / y_max, so those two values get no tick or number
+    (mark a bound there with add_text/add_equation if it matters)."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -352,7 +354,9 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
         payload["show_numbers"] = True
     scene.objects.append(Obj(id=oid, kind="plot", position=(x, y), payload=payload))
     return ok({"scene_id": scene.id, "object_id": oid, "functions": len(funcs),
-               "x_range": payload["x_range"], "y_range": payload["y_range"]}, untrusted=["expr"])
+               "x_range": payload["x_range"], "y_range": payload["y_range"]}, untrusted=["expr"],
+              limitations=["no tick or number at x_max / y_max: the axis tips sit there"]
+              if show_numbers else [])
 
 
 @mcp.tool()

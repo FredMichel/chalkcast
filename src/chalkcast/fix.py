@@ -82,7 +82,9 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
             return False
         if any(b.left - pad <= p[0] <= b.right + pad and b.bottom - pad <= p[1] <= b.top + pad for p in pts):
             return False
-        return all(b.overlap_area(o) <= 0 for o in boxes)
+        gap = 0.1  # labels next to each other keep a visible gap
+        return all(b.overlap_area(BBox(cx=o.cx, cy=o.cy, width=o.width + 2 * gap,
+                                       height=o.height + 2 * gap)) <= 0 for o in boxes)
 
     best = None
     step = 0.1
@@ -177,6 +179,12 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             # move the label (the text-like side) to the nearest free spot
             cand = [c for c in (oid, o.get("other")) if c and scene.get_obj(c)
                     and scene.get_obj(c).kind in TEXTLIKE and c not in touched]
+            # move the label written later: the earlier one (often the title) keeps its place
+            first = {}
+            for st in scene.steps:
+                for t in ([*st.targets, st.to] if st.kind == "transform" else st.targets):
+                    first.setdefault(t, st.index)
+            cand.sort(key=lambda c: -first.get(c, 0))
             target = cand[0] if cand else None
             if target is None:
                 unresolved.append(o)

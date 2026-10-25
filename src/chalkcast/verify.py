@@ -177,7 +177,9 @@ def _shown_geoms(scene: Scene) -> list[str]:
     return seen
 
 
-def _inside(pt: list[float], box: BBox, shrink: float = 0.02) -> bool:
+def _inside(pt: list[float], box: BBox, shrink: float = -0.02) -> bool:
+    """Point within the box; by default the box is padded by about half a stroke
+    width, since a curve drawn at that distance already touches the glyphs."""
     return (box.left + shrink <= pt[0] <= box.right - shrink
             and box.bottom + shrink <= pt[1] <= box.top - shrink)
 
@@ -232,6 +234,22 @@ def beat_conflicts(scene: Scene, only_step: int | None = None) -> list[str]:
     for beat in _beats(scene):
         if only_step is not None and only_step not in [st.index for st in beat]:
             continue
+        # Manim keeps one animation per mobject in a play(): the last one wins, so an
+        # earlier one (a write, a transform's morph) silently never happens
+        animated: dict[str, int] = {}
+        for st in beat:
+            if st.kind not in ("write", "highlight", "fade", "transform"):
+                continue
+            for tid in st.targets:
+                if tid in animated:
+                    out.append(f"steps {animated[tid]} and {st.index} both animate '{tid}' in the "
+                               f"same beat: Manim keeps only the last (step {st.index}), so step "
+                               f"{animated[tid]} would never show; make it a separate step")
+                animated.setdefault(tid, st.index)
+        cams = [st.index for st in beat if st.kind == "camera_move"]
+        if len(cams) > 1:
+            out.append(f"steps {cams} move the camera in the same beat: Manim keeps only the last; "
+                       "combine them into one camera_move (zoom and focus together)")
         params = [st.param for st in beat if st.kind == "tween"]
         for dup in sorted({p for p in params if params.count(p) > 1}):
             out.append(f"parameter '{dup}' is tweened twice in the same beat (only the last "
@@ -918,12 +936,28 @@ def _lane_fidelity(scene: Scene, geo: Geometry) -> tuple[list[dict[str, Any]], l
                     w[key] = c[key]
                     if key == "max_error":
                         w["at_x"] = c.get("at_x")
-        undefined = sorted({c.get("fn") for c in drawn if c.get("defined_fraction") == 0.0})
-        for i in undefined:
+        # where it draws nothing: at the declared values (None) or where a tween lands
+        undefined: dict[int, list[dict[str, float] | None]] = {}
+        for c in (geo.curves(obj.id) if initial else []):
+            if c.get("defined_fraction") == 0.0:
+                undefined.setdefault(c.get("fn"), []).append(None)
+        for st in seen:
+            for c in st.get("curves", {}).get(obj.id, []):
+                if c.get("defined_fraction") == 0.0:
+                    undefined.setdefault(c.get("fn"), []).append(st.get("params", {}))
+        for i, where in sorted(undefined.items()):
+            if None in where:
+                rng.append(_obl(scene.id, "range", "error",
+                                f"curve {i} of '{obj.id}' draws nothing: its function is undefined on "
+                                "the whole x_range (measured)", "change x_range to where the function "
+                                "is defined, or fix the expression", target=obj.id, fn=i))
+                continue
+            at = ", ".join(f"{k}={v:.3g}" for k, v in where[0].items() if k in obj_params(obj, scene))
             rng.append(_obl(scene.id, "range", "error",
-                            f"curve {i} of '{obj.id}' draws nothing: its function is undefined on "
-                            "the whole x_range (measured)", "change x_range to where the function "
-                            "is defined, or fix the expression", target=obj.id, fn=i))
+                            f"curve {i} of '{obj.id}' draws nothing at {at}, where a tween lands: its "
+                            "function is undefined on the whole x_range there (measured)",
+                            "stop the tween short of that value (e.g. 0.01 instead of 0), or rewrite "
+                            "the expression so it is defined there", target=obj.id, fn=i))
         for c in worst.values():
             i = c.get("fn")
             if i in undefined:
