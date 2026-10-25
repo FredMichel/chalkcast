@@ -99,7 +99,8 @@ def _fidelity(ax: Any, f: Any, graph: Any) -> dict[str, Any]:
     return {"max_error": worst, "at_x": worst_x, "segments": n_seg, "points": samples}
 
 
-def _clipped_fraction(ax: Any, f: Any) -> float:
+def _domain(ax: Any, f: Any) -> tuple[float, float]:
+    """(fraction clipped by the y-range, fraction where the function is defined)."""
     import numpy as np
 
     x0, x1 = float(ax.x_range[0]), float(ax.x_range[1])
@@ -118,7 +119,7 @@ def _clipped_fraction(ax: Any, f: Any) -> float:
     # sqrt(x) for x<0) are not "clipped" -- the function simply does not exist there.
     fin = np.isfinite(ys)
     outside = fin & ((ys < y0 - margin) | (ys > y1 + margin))
-    return float(outside.mean())
+    return float(outside.mean()), float(fin.mean())
 
 
 def _path_samples(m: Any, per_leaf: int = 24) -> list[list[float]]:
@@ -157,7 +158,10 @@ def _ink(m: Any, kind: str) -> list[list[float]]:
     if pts.shape[0] == 0:
         return []
     if m.get_fill_opacity() > 0.5:  # filled (dot): sample the whole disc
-        l, r, b, t = _bbox(m)
+        box = _bbox(m)
+        if box is None:  # no finite point (anchor undefined): nothing drawn
+            return []
+        l, r, b, t = box
         return [[float(x), float(y)] for x in np.linspace(l, r, 5) for y in np.linspace(b, t, 5)]
     # along the path, not just its control points: a straight arrow or a rectangle
     # side has only its endpoints and two handles, which miss a label in the middle
@@ -243,10 +247,12 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
                 f, g = ns[f"{oid}_f{i}"], ns[f"{oid}_g{i}"]
                 fid = _fidelity(ax, f, g)
                 fid["fn"] = i
-                fid["clipped_fraction"] = _clipped_fraction(ax, f)
+                fid["clipped_fraction"], fid["defined_fraction"] = _domain(ax, f)
                 curves.append(fid)
+            # axis labels are ink a note must not sit on, like the axes themselves
+            labels = ns.get(f"{oid}_labels")
             plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves,
-                          "axes_points": _path_samples(ax)}
+                          "axes_points": _path_samples(ax) + (_path_samples(labels) if labels else [])}
         elif kind == "shape":
             ink[oid] = _ink(m, kind)
 
@@ -279,8 +285,9 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
                     if st.get("beat_end"):  # fidelity/clipping where each tween lands
                         ax, f = ns[f"{o['id']}_ax"], ns[f"{o['id']}_f{i}"]
                         fid = _fidelity(ax, f, g)
+                        clipped, defined = _domain(ax, f)
                         curves.append({"fn": i, "max_error": fid["max_error"], "at_x": fid["at_x"],
-                                       "clipped_fraction": _clipped_fraction(ax, f)})
+                                       "clipped_fraction": clipped, "defined_fraction": defined})
                 ink_at[o["id"]] = pts
                 if curves:
                     curves_at[o["id"]] = curves

@@ -96,6 +96,34 @@ def validate(expr: str, params: Iterable[str] = ()) -> None:
         raise ExprError(f"{expr!r} could not be evaluated at any sample point")
 
 
+def free_names(expr: str) -> set[str]:
+    """Names an expression reads from outside (not the variables of its own
+    comprehensions: in ``sum(sin(k*x) for k in ...)`` k is not a parameter)."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return set()
+    out: set[str] = set()
+
+    def visit(node: ast.AST, bound: frozenset[str]) -> None:
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            inner = set(bound)
+            for gen in node.generators:
+                visit(gen.iter, frozenset(inner))
+                inner |= {t.id for t in ast.walk(gen.target) if isinstance(t, ast.Name)}
+                for cond in gen.ifs:
+                    visit(cond, frozenset(inner))
+            visit(node.elt, frozenset(inner))
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in bound:
+            out.add(node.id)
+        for child in ast.iter_child_nodes(node):
+            visit(child, bound)
+
+    visit(tree, frozenset())
+    return out
+
+
 def compile_fn(expr: str, params: Iterable[str] = ()):
     """A python callable f(x, **params) for an already-validated expression."""
     code = compile(ast.parse(expr, mode="eval"), "<expr>", "eval")

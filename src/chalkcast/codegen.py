@@ -15,8 +15,8 @@ Object ids double as Python variable names (valid identifiers by construction).
 
 from __future__ import annotations
 
-import re
 
+from .expr import free_names
 from .model import Obj, Scene, Step
 from .themes import theme
 
@@ -147,6 +147,16 @@ def _cc_helper_graph(ax, f, a, b):
 
 
 # default colour of the i-th curve of a plot, so two curves are never identical
+_COLOR_HEX = {  # Manim CE values of the names above
+    'BLACK': '#000000', 'BLUE': '#58c4dd', 'BLUE_A': '#c7e9f1', 'BLUE_B': '#9cdceb',
+    'BLUE_C': '#58c4dd', 'BLUE_D': '#29abca', 'BLUE_E': '#236b8e', 'DARK_GRAY': '#444444',
+    'GOLD': '#f0ac5f', 'GRAY': '#888888', 'GREEN': '#83c167', 'GREEN_A': '#c9e2ae',
+    'GREEN_E': '#699c52', 'GREY': '#888888', 'LIGHT_GRAY': '#bbbbbb', 'MAROON': '#c55f73',
+    'ORANGE': '#ff862f', 'PINK': '#d147bd', 'PURPLE': '#9a72ac', 'RED': '#fc6255',
+    'RED_A': '#f7a1a3', 'RED_E': '#cf5044', 'TEAL': '#5cd0b3', 'WHITE': '#ffffff',
+    'YELLOW': '#f7d96f', 'YELLOW_A': '#fff1b6', 'YELLOW_E': '#e8c11c',
+}
+
 CURVE_COLORS = ("#f6c76b", "#6bc5f6", "#f6866b", "#8ee07a", "#c99bf0")  # dark boards
 LIGHT_CURVE_COLORS = ("#c2410c", "#1d4ed8", "#b91c1c", "#15803d", "#7e22ce")
 
@@ -178,7 +188,8 @@ def _scale(obj: Obj) -> str:
 
 
 def uses_params(expr: str, params: dict[str, float]) -> bool:
-    return any(re.search(rf"\b{re.escape(p)}\b", expr) for p in params)
+    names = free_names(expr)
+    return any(p in names for p in params)
 
 
 def _fn_def(name: str, expr: str, params: dict[str, float]) -> list[str]:

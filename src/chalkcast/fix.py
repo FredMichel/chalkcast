@@ -20,10 +20,24 @@ from typing import Any
 
 from .geometry import SAFE_MARGIN, FRAME_HEIGHT, FRAME_WIDTH, BBox
 from .model import Scene
-from .verify import MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline, zoom_while_visible
+from .verify import (DEFAULT_VIEW, MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline, view_margin,
+                     zoom_while_visible)
 
 _SAFE_L, _SAFE_R = -FRAME_WIDTH / 2 + SAFE_MARGIN, FRAME_WIDTH / 2 - SAFE_MARGIN
 _SAFE_B, _SAFE_T = -FRAME_HEIGHT / 2 + SAFE_MARGIN, FRAME_HEIGHT / 2 - SAFE_MARGIN
+
+
+def _safe_bounds(o: dict[str, Any]) -> tuple[float, float, float, float]:
+    """Safe area (l, r, b, t) of the camera view a framing finding was measured in."""
+    v = BBox(*o["view"]) if o.get("view") else DEFAULT_VIEW
+    m = view_margin(v)
+    return v.left + m, v.right - m, v.bottom + m, v.top - m
+
+
+def _into(box: BBox, l: float, r: float, b: float, t: float) -> tuple[float, float]:
+    dx = (l - box.left) if box.left < l else (r - box.right) if box.right > r else 0.0
+    dy = (b - box.bottom) if box.bottom < b else (t - box.top) if box.top > t else 0.0
+    return dx, dy
 
 
 def _shift(box: BBox, dx: float, dy: float) -> BBox:
@@ -114,8 +128,10 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             if plot is None or box is None or plot.id in touched:
                 unresolved.append(o)
                 continue
-            dx = (_SAFE_L - box.left) if box.left < _SAFE_L else (_SAFE_R - box.right) if box.right > _SAFE_R else 0.0
-            dy = (_SAFE_B - box.bottom) if box.bottom < _SAFE_B else (_SAFE_T - box.top) if box.top > _SAFE_T else 0.0
+            dx, dy = _into(box, *_safe_bounds(o))
+            if abs(dx) < 1e-3 and abs(dy) < 1e-3:
+                unresolved.append(o)  # inside at its first state: it is a tween that overflows
+                continue
             x, y = plot.position
             plot.position = (round(x + dx, 3), round(y + dy, 3))
             for dep in scene.objects:
@@ -135,13 +151,18 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 unresolved.append(o)
                 continue
             new_scale = obj.scale
-            sw, sh = (_SAFE_R - _SAFE_L), (_SAFE_T - _SAFE_B)
+            sl, sr, sb, st_ = _safe_bounds(o)
+            sw, sh = sr - sl, st_ - sb
             factor = min(1.0, 0.97 * sw / box.width if box.width else 1, 0.97 * sh / box.height if box.height else 1)
             if factor < 1.0:
                 new_scale = round(obj.scale * factor, 3)
                 box = BBox(cx=box.cx, cy=box.cy, width=box.width * factor, height=box.height * factor)
-            dx = (_SAFE_L - box.left) if box.left < _SAFE_L else (_SAFE_R - box.right) if box.right > _SAFE_R else 0.0
-            dy = (_SAFE_B - box.bottom) if box.bottom < _SAFE_B else (_SAFE_T - box.top) if box.top > _SAFE_T else 0.0
+            dx, dy = _into(box, sl, sr, sb, st_)
+            if factor == 1.0 and abs(dx) < 1e-3 and abs(dy) < 1e-3:
+                # already inside at its first state: the overflow comes from a tween,
+                # which moving the object would not fix -- say so instead of a no-op
+                unresolved.append(o)
+                continue
             x, y = obj.position
             obj.position = (round(x + dx, 3), round(y + dy, 3))
             obj.scale = new_scale

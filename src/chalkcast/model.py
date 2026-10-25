@@ -139,6 +139,11 @@ class Step:
             d["with_previous"] = True
         if self.kind == "tween":
             d["param"], d["value"] = self.param, self.value
+        if self.kind == "camera_move" and self.to:
+            z, _, xy = self.to.partition("@")
+            fx, _, fy = xy.partition(",")
+            d["zoom"] = float(z or 1)
+            d["focus"] = [float(fx), float(fy)] if fx != "" and fy != "" else None
         return d
 
 

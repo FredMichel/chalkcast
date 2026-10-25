@@ -322,13 +322,14 @@ def test_rewriting_a_visible_object_warns(scene):
 
 
 # A14. content written outside a zoomed camera passed
-def test_writing_outside_the_camera_view_warns(scene):
+def test_writing_outside_the_camera_view_is_flagged(scene):
     a = _id(srv.add_text("Title", y=3))
     b = _id(srv.add_text("Note", x=-5, y=-3))
     srv.add_step("write", targets=[a])
     srv.add_step("camera_move", zoom=3)
     srv.add_step("write", targets=[b])
-    assert any("outside the camera" in o["summary"] for o in _lanes(scene, "warning"))
+    # never revealed by a later zoom-out: it is never seen at all
+    assert any("outside the camera" in o["summary"] for o in _lanes(scene, "error"))
 
 
 # A15. smooth='false' turned smoothing ON; dx='0.1' failed only later
@@ -580,3 +581,122 @@ def test_project_ids_skip_existing_directories(tmp_path):
     import itertools
     session._counter = itertools.count(100)
     assert session.create_project().id == "proj-0101"
+
+
+# ---- sixth audit ----------------------------------------------------------------
+
+# E1. framing is judged in the camera's view while the object is shown
+def test_framing_follows_the_camera(scene):
+    a, b = _id(srv.add_text("Left", x=-9)), _id(srv.add_text("Right", x=9))
+    srv.add_step("camera_move", zoom=0.5)
+    srv.add_step("write", targets=[a, b])
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o["lane"] == "framing" and o["severity"] == "error"]
+
+
+def test_fix_scene_moves_into_the_camera_view(scene):
+    t = _id(srv.add_text("Over here", x=12))
+    srv.add_step("camera_move", zoom=1, focus_x=12, focus_y=0)
+    srv.add_step("write", targets=[t])
+    _measured(scene)  # in the view: nothing to fix
+    srv.update_object(t, x=19)
+    srv.fix_scene()
+    x = scene.get_obj(t).position[0]
+    assert 12 - 7.1 < x < 12 + 7.1  # moved into the camera's view, not the default frame
+
+
+# E2. fix_scene never reports a move it did not make
+def test_fix_scene_reports_no_noop_moves(scene):
+    pytest.importorskip("manim")
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["sin(x)"], x_range=[-5, 5]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="0"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=20)
+    r = srv.fix_scene()
+    assert not [c for c in r["result"]["changes"] if c.get("object") == d]
+
+
+# E3. a curve undefined on its whole x_range is an error, not blank axes that pass
+def test_curve_undefined_everywhere(scene):
+    p = _id(srv.add_plot(functions=["sqrt(x)"], x_range=[-5, -1], y_range=[0, 3]))
+    srv.add_step("write", targets=[p])
+    r = _measured(scene)
+    assert any("draws nothing" in o["summary"] for o in r["obligations"] if o["severity"] == "error")
+
+
+# E4. axis labels are ink a label must not sit on
+def test_text_on_axis_label_collides(scene):
+    p = _id(srv.add_plot(functions=["0.2*x"], x_label=r"\text{time (s)}", y_label=r"\text{velocity}"))
+    t = _id(srv.add_text("NOTE", x=4.9, y=0.45, font_size=40))
+    srv.add_step("write", targets=[p, t])
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" for o in r["obligations"])
+
+
+# E5. a faded object may move off-screen unseen
+def test_faded_object_not_framed(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["sin(x - t)"], x_range=[-5, 5]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="0"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=3)
+    srv.add_step("fade", targets=[d])
+    srv.add_step("tween", param="t", value=20)
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o["lane"] == "framing" and o.get("target") == d
+                and o["severity"] == "error"]
+
+
+# E6. export is judged on the render's verdict, not on a later inspection
+def test_export_uses_render_time_verdict(scene, monkeypatch):
+    t = _id(srv.add_text("far", x=10))
+    srv.add_step("write", targets=[t])
+    proj = session.get_project()
+    session.set_last_render(proj.id, scene.id, {
+        "ok": True, "artifact": "/nonexistent.mp4", "fingerprint": srv._fingerprint(scene),
+        "blocking": [{"severity": "error", "summary": "off-screen"}]})
+    proj.obligations.clear()  # as if a later inspect_render of another state passed
+    r = srv.export_gif()
+    assert r["ok"] is False and "rendered" in r["error"]
+
+
+# E7. explicit colors that vanish on the theme background are flagged
+def test_low_contrast_color(scene):
+    session.get_project().theme = "whiteboard"
+    t = _id(srv.add_text("Key idea", color="WHITE"))
+    srv.add_step("write", targets=[t])
+    obls = inspect_scene(scene, theme_name="whiteboard")["obligations"]
+    assert any("contrast" in o["summary"] for o in obls)
+    assert not any("contrast" in o["summary"]
+                   for o in inspect_scene(scene, theme_name="chalkboard")["obligations"])
+
+
+# E8. a dot with an undefined anchor is reported, not a probe crash
+def test_undefined_anchor_reported(scene):
+    p = _id(srv.add_plot(functions=["x"]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="2", at_y="log(-2)"))
+    srv.add_step("write", targets=[p, d])
+    r = _measured(scene)
+    assert not any(o["lane"] == "compile" for o in r["obligations"])
+    assert any("no finite position" in o["summary"] for o in r["obligations"])
+
+
+# E9. a comprehension variable named like a parameter is not that parameter
+def test_comprehension_variable_is_not_a_parameter(scene):
+    from chalkcast.codegen import uses_params
+    assert not uses_params("sum(sin(k*x)/k for k in range(1, 9, 2))", {"k": 1.0})
+    assert uses_params("sum(sin(j*x)/k for j in range(1, 9, 2))", {"k": 1.0})
+
+
+# minor: stale obligations and readable camera steps
+def test_inspect_project_marks_stale_and_decodes_camera(scene):
+    t = _id(srv.add_text("far", x=10))
+    srv.add_step("camera_move", zoom=2)
+    srv.add_step("write", targets=[t])
+    srv.inspect_render()
+    srv.update_object(t, x=0)
+    r = srv.inspect_project()
+    assert r["obligations"] and all(o.get("stale") for o in r["obligations"])
+    cam = r["result"]["scenes"][0]["steps"][0]
+    assert cam["zoom"] == 2.0 and cam["focus"] is None

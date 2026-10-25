@@ -66,8 +66,14 @@ def _require_scene(project_id: str | None, scene_id: str | None) -> tuple[Projec
     return project, scene
 
 
+_measured_at: dict[str, str] = {}  # "project/scene" -> fingerprint of the last inspection
+
+
 def _register_obligations(project: Project, scene_id: str, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Replace this scene's open obligations with a freshly measured set."""
+    sc = project.get_scene(scene_id)
+    if sc is not None:
+        _measured_at[f"{project.id}/{scene_id}"] = _fingerprint(sc)
     project.obligations = [
         o for o in project.obligations if not (o["scene"] == scene_id and o["status"] == "open")
     ]
@@ -242,9 +248,14 @@ def inspect_project(project_id: str | None = None) -> dict[str, Any]:
     project = session.get_project(project_id)
     if project is None:
         return err("no open project")
-    return ok(project.to_dict(),
-              obligations=[o for o in project.obligations if o["status"] == "open"],
-              coverage={"scope": project.id})
+    # an obligation measured before later edits may no longer hold: say so
+    changed = {sc.id for sc in project.scenes
+               if _measured_at.get(f"{project.id}/{sc.id}") not in (None, _fingerprint(sc))}
+    obls = [{**o, "stale": True} if o["scene"] in changed else o
+            for o in project.obligations if o["status"] == "open"]
+    return ok(project.to_dict(), obligations=obls, coverage={"scope": project.id},
+              limitations=[f"scene(s) {sorted(changed)} changed since their last inspection: their "
+                           "obligations are marked stale; call inspect_render again"] if changed else [])
 
 
 @mcp.tool()
@@ -879,7 +890,7 @@ def inspect_render(scene_id: str | None = None, project_id: str | None = None) -
         return got
     project, scene = got
     probe = _measure(project, scene)
-    insp = inspect_scene(scene, render_report=None, measurement=probe)
+    insp = inspect_scene(scene, measurement=probe, theme_name=project.theme)
     obls = _register_obligations(project, scene.id, insp["obligations"])
     return ok({"scene_id": scene.id},
               timing=(probe or {}).get("timing", {}),
@@ -906,7 +917,7 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
     if probe is None or probe.get("ok") is not True:
         return err("fix_scene needs measured geometry (Manim, and a probe that completes); "
                    "estimated findings are not auto-fixed")
-    insp = inspect_scene(scene, measurement=probe)
+    insp = inspect_scene(scene, measurement=probe, theme_name=project.theme)
     attempts: dict[str, int] = {}  # repairs tried per curve, so none is retried in a loop
     for _ in range(max_rounds):
         changes, _unresolved = apply_fixes(scene, insp["obligations"], probe, attempts)
@@ -914,7 +925,7 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
             break
         all_changes += changes
         probe = _measure(project, scene)
-        insp = inspect_scene(scene, measurement=probe)
+        insp = inspect_scene(scene, measurement=probe, theme_name=project.theme)
         if probe is None or probe.get("ok") is not True:
             break
     obls = _register_obligations(project, scene.id, insp["obligations"])
@@ -935,7 +946,7 @@ def render_scene(scene_id: str | None = None, project_id: str | None = None) -> 
     wd = session.workdir(project.id, scene.id)
     probe = _measure(project, scene)
     if probe is not None and probe.get("ok") is False:
-        insp = inspect_scene(scene, measurement=probe)
+        insp = inspect_scene(scene, measurement=probe, theme_name=project.theme)
         obls = _register_obligations(project, scene.id, insp["obligations"])
         return err("scene construction failed; render skipped", payload={"scene_id": scene.id},
                    timing=probe.get("timing", {}), coverage=_coverage(insp, scene),
@@ -943,10 +954,13 @@ def render_scene(scene_id: str | None = None, project_id: str | None = None) -> 
                    untrusted=["manim_stderr", "latex_log"])
     report = rnd.render_scene(project, scene, wd)
     report["fingerprint"] = _fingerprint(scene)
-    session.set_last_render(project.id, scene.id, report)
 
-    insp = inspect_scene(scene, render_report=report, measurement=probe)
+    insp = inspect_scene(scene, render_report=report, measurement=probe,
+                         theme_name=project.theme)
     obls = _register_obligations(project, scene.id, insp["obligations"])
+    # export is judged on this render's own verdict, not on a later inspection
+    report["blocking"] = [o for o in obls if o["severity"] == "error"]
+    session.set_last_render(project.id, scene.id, report)
     timing = {**report.get("timing", {}), **(probe or {}).get("timing", {})}
     if not report.get("ok"):
         return err("render failed", payload={"scene_id": scene.id}, timing=timing,
@@ -987,22 +1001,23 @@ def export_gif(width: int = 640, fps: int = 15, scene_id: str | None = None,
                project_id: str | None = None) -> dict[str, Any]:
     """Export the latest render of a scene as a shareable GIF, resampled to `width`
     pixels wide at `fps` (defaults keep GIFs small). Blocked by open error
-    obligations and by edits made since the render."""
+    obligations of that render and by edits made since it."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
     project, scene = got
-    blocking = [o for o in project.obligations
-                if o["scene"] == scene.id and o["status"] == "open" and o["severity"] == "error"]
-    if blocking:
-        return err("export blocked by open error obligations; fix them (fix_scene can repair "
-                   "mechanical ones) and re-render", obligations=blocking)
     report = session.get_last_render(project.id, scene.id)
     if not report or not report.get("ok") or not report.get("artifact"):
         return err("no rendered video for this scene; call render_scene first")
     if report.get("fingerprint") != _fingerprint(scene):
         return err("the scene changed since its last render; call render_scene again so the "
                    "GIF (and its verification) matches the current scene")
+    # the video is exactly the rendered scene: its render-time verdict decides
+    blocking = report.get("blocking", [])
+    if blocking:
+        return err("export blocked by error obligations found when this video was rendered; "
+                   "fix them (fix_scene can repair mechanical ones) and re-render",
+                   obligations=blocking)
     if not 64 <= width <= 3840 or not 1 <= fps <= 60:
         return err("width must be in 64..3840 and fps in 1..60")
     res = rnd.export_gif(Path(report["artifact"]), session.workdir(project.id, scene.id),

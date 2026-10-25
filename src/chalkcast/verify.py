@@ -22,9 +22,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .geometry import FRAME_HEIGHT, FRAME_WIDTH, SAFE_MARGIN, BBox, within_safe_area
-from .codegen import plot_is_dynamic, uses_params
+from .geometry import FRAME_HEIGHT, FRAME_WIDTH, SAFE_MARGIN, BBox
+from .codegen import _COLOR_HEX, plot_is_dynamic, uses_params
 from .model import Obj, Scene
+from .themes import DEFAULT_THEME, theme
 
 COLLISION_THRESHOLD = 0.35   # estimated mode: overlap / smaller area
 MEASURED_TEXT_OVERLAP = 0.10  # measured mode: text-on-text overlap that is a defect
@@ -35,6 +36,7 @@ MAX_CLIPPED = 0.5             # curve fraction outside y_range before it is a wa
 TICK_FONT_SIZE = 24           # axis numbers (codegen's include_numbers font size)
 MATHTEX_FONT_SIZE = 48        # Manim's MathTex default; scale multiplies it
 MARGIN_TOLERANCE = 0.1        # measured intrusion into the safe margin worth noting (info)
+MIN_CONTRAST = 1.6            # WCAG contrast ratio below which a color all but vanishes
 TEXTLIKE = ("text", "equation")
 
 GEOMETRIC_LANES = ["framing", "collision", "legibility", "timing", "fidelity", "range"]
@@ -88,14 +90,26 @@ class Geometry:
         obj = self.scene.get_obj(oid)
         return obj.estimate_bbox() if obj else None
 
-    def all_boxes(self, oid: str) -> list[BBox]:
-        """Initial box plus the box at every parameter state the timeline visits."""
+    def boxes_while(self, oid: str, steps: set[int]) -> list[BBox]:
+        """Initial box plus the box at every tween state measured while ``oid`` is
+        on screen (``steps``): a faded dot may move off-screen unseen."""
         out = [b for b in [self.bbox(oid)] if b]
         for st in self._states:
-            b = self._box(st["objects"].get(oid))
-            if b:
-                out.append(b)
+            if int(st.get("step", 0)) in steps:
+                b = self._box(st["objects"].get(oid))
+                if b:
+                    out.append(b)
         return out
+
+    def undefined(self, oid: str, steps: set[int]) -> bool:
+        """Measured with no finite point (e.g. a dot anchored at log(-2)) while shown."""
+        if not self.measured:
+            return False
+        rec = self._objs.get(oid)
+        if rec is not None and rec.get("bbox") is None:
+            return True
+        return any(oid in st["objects"] and st["objects"][oid] is None
+                   for st in self._states if int(st.get("step", 0)) in steps)
 
     def moving_points(self, oid: str) -> list[list[float]]:
         """Every position a moving curve/shape takes during the tweens (measured)."""
@@ -246,66 +260,99 @@ def unused_tweens(scene: Scene) -> list[int]:
             and st.param not in used]
 
 
-def _camera_views(scene: Scene) -> dict[int, BBox]:
-    """Camera frame (absolute zoom, kept centre) at each write step, when zoomed."""
-    zoom, cx, cy, views = 1.0, 0.0, 0.0, {}
-    for st in scene.steps:
+DEFAULT_VIEW = BBox(cx=0.0, cy=0.0, width=FRAME_WIDTH, height=FRAME_HEIGHT)
+
+
+def visible_views(scene: Scene) -> dict[str, list[tuple[int, BBox]]]:
+    """For each shown geometry: (step index, camera frame) at every step it is on
+    screen. camera_move zoom is absolute; a move without focus keeps the centre."""
+    zoom, cx, cy = 1.0, 0.0, 0.0
+    out: dict[str, list[tuple[int, BBox]]] = {}
+    for st, shown in zip(scene.steps, timeline(scene)):
         if st.kind == "camera_move" and st.to:
             z, _, xy = st.to.partition("@")
             fx, _, fy = xy.partition(",")
             zoom = float(z or 1)
             if fx != "" and fy != "":
                 cx, cy = float(fx), float(fy)
-        elif st.kind == "write" and (zoom != 1.0 or cx or cy):
-            views[st.index] = BBox(cx=cx, cy=cy, width=FRAME_WIDTH / zoom, height=FRAME_HEIGHT / zoom)
-    return views
+        view = BBox(cx=cx, cy=cy, width=FRAME_WIDTH / zoom, height=FRAME_HEIGHT / zoom)
+        for g in shown.values():
+            out.setdefault(g, []).append((st.index, view))
+    return out
+
+
+def overflow(box: BBox, view: BBox) -> float:
+    """How far ``box`` reaches beyond ``view`` (negative: clearance inside it)."""
+    return max(box.right - view.right, view.left - box.left, box.top - view.top,
+               view.bottom - box.bottom)
+
+
+def view_margin(view: BBox) -> float:
+    """The safe margin, scaled with the camera (it is a fraction of the screen)."""
+    return SAFE_MARGIN * view.width / FRAME_WIDTH
+
+
+def _where(view: BBox) -> str:
+    if view == DEFAULT_VIEW:
+        return "off-screen"
+    return (f"outside the camera's view (zoom {FRAME_WIDTH / view.width:.3g}, centre "
+            f"{view.cx:.3g},{view.cy:.3g})")
 
 
 def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
+    """Each object must be fully inside the camera frame at some moment it is on
+    screen: zooming in on a detail may crop others, and a zoom-out may reveal
+    what was written outside the view, but something never fully seen is a defect."""
     out = []
-    for idx, view in _camera_views(scene).items():
-        st = scene.steps[idx - 1]
-        for tid in st.targets:
-            b = geo.bbox(tid)
-            if b and (b.left < view.left or b.right > view.right or
-                      b.bottom < view.bottom or b.top > view.top):
-                out.append(_obl(scene.id, "framing", "warning",
-                                f"step {idx} writes '{tid}' outside the camera's current view",
-                                "move the camera (camera_move) or the object", step=idx, target=tid))
-    hw, hh = FRAME_WIDTH / 2, FRAME_HEIGHT / 2
     shown = _shown_geoms(scene) if scene.steps else [o.id for o in scene.objects]
+    vis = visible_views(scene)
     for oid in shown:
         obj = scene.get_obj(oid)
         if obj is None:
             continue
+        seen = vis.get(oid) or [(0, DEFAULT_VIEW)]
+        steps = {i for i, _ in seen}
+        views = list({(v.cx, v.cy, v.width, v.height): v for _, v in seen}.values())
         if not geo.measured:
             cx, cy = obj.position
+            centre = BBox(cx=cx, cy=cy, width=0.0, height=0.0)
+            best = min(views, key=lambda v: overflow(centre, v))
             # A center outside the frame is definitely wrong -> error.
-            if abs(cx) > hw or abs(cy) > hh:
+            if overflow(centre, best) > 0:
                 out.append(_obl(scene.id, "framing", "error",
-                                f"object '{oid}' is positioned off-screen (center at {cx:.1f},{cy:.1f})",
-                                "move its position back inside the frame", target=oid))
+                                f"object '{oid}' is positioned {_where(best)} (center at "
+                                f"{cx:.1f},{cy:.1f})", "move it (or the camera) back inside the frame",
+                                target=oid, view=[best.cx, best.cy, best.width, best.height]))
             # bbox estimates (font/LaTeX width unknown) only ever warn.
-            elif obj.kind not in ("area", "riemann") and not within_safe_area(obj.estimate_bbox()):
+            elif obj.kind not in ("area", "riemann") and not any(
+                    overflow(obj.estimate_bbox(), v) <= -view_margin(v) + 1e-6 for v in views):
                 out.append(_obl(scene.id, "framing", "warning",
                                 f"object '{oid}' may extend outside the safe area (estimated)",
                                 "nudge it toward the center or reduce its scale if the render "
                                 "confirms it", target=oid))
             continue
-        boxes = geo.all_boxes(oid)
+        if obj.kind == "shape" and geo.undefined(oid, steps):
+            out.append(_obl(scene.id, "framing", "error",
+                            f"shape '{oid}' has no finite position while shown (its anchor is "
+                            "undefined there, e.g. log of a negative number) and is not drawn",
+                            "change its anchor expression or the parameter range", target=oid))
+            continue
+        boxes = geo.boxes_while(oid, steps)
         if not boxes:
             continue
-        over = max(max(b.right - hw, -hw - b.left, b.top - hh, -hh - b.bottom) for b in boxes)
+        best = min(views, key=lambda v: max(overflow(b, v) for b in boxes))
+        over = max(overflow(b, best) for b in boxes)
         if over > OFFSCREEN_TOLERANCE:
             out.append(_obl(scene.id, "framing", "error",
-                            f"object '{oid}' extends {over:.2f} units off-screen (measured)",
-                            "move it toward the center or reduce its scale (fix_scene can do this)",
-                            target=oid, overflow=round(over, 3)))
-        elif over > MARGIN_TOLERANCE - SAFE_MARGIN:
+                            f"object '{oid}' extends {over:.2f} units {_where(best)} (measured)",
+                            "move it toward the center or reduce its scale (fix_scene can do "
+                            "this), or move the camera", target=oid, overflow=round(over, 3),
+                            view=[best.cx, best.cy, best.width, best.height]))
+        elif over > MARGIN_TOLERANCE - view_margin(best):
             # inside the frame but near its edge: worth knowing, not a defect of a GIF
             out.append(_obl(scene.id, "framing", "info",
-                            f"object '{oid}' reaches {over + SAFE_MARGIN:.2f} units into the "
-                            f"{SAFE_MARGIN}-unit safe margin (measured)",
+                            f"object '{oid}' reaches {over + view_margin(best):.2f} units into the "
+                            f"{view_margin(best):.2g}-unit safe margin (measured)",
                             "nudge it toward the center", target=oid))
     return out
 
@@ -426,10 +473,53 @@ def zoom_while_visible(scene: Scene) -> dict[str, float]:
     return out
 
 
-def _lane_legibility(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
+def _luminance(color: str) -> float | None:
+    h = _COLOR_HEX.get(color.upper(), color).lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return None
+    try:
+        rgb = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    except ValueError:
+        return None
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def contrast(a: str, b: str) -> float | None:
+    """WCAG contrast ratio of two colors (1 = identical, 21 = black on white)."""
+    la, lb = _luminance(a), _luminance(b)
+    if la is None or lb is None:
+        return None
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
+    """(what, color) for every color the author set on a stroked/text object."""
+    if obj.kind in ("area", "riemann"):
+        return []  # translucent fills over the board, judged by their curve
+    out = [(f"'{obj.id}'", obj.color)] if obj.color else []
+    if obj.kind == "plot":
+        for i, f in enumerate(obj.payload.get("functions", []), 1):
+            if isinstance(f, dict) and f.get("color"):
+                out.append((f"curve {i} of '{obj.id}'", str(f["color"])))
+    return out
+
+
+def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEME) -> list[dict[str, Any]]:
     out = []
     zoom = zoom_while_visible(scene)  # a zoomed-out camera shrinks everything on screen
+    bg = theme(theme_name)["background_color"]
     for obj in scene.objects:
+        for what, col in _explicit_colors(obj):
+            c = contrast(col, bg)
+            if c is not None and c < MIN_CONTRAST:
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"{what} is {col} on the {theme_name} background {bg} (contrast "
+                                f"{c:.2f}:1): nearly invisible", "pick a color that contrasts with "
+                                "the theme, or omit color to use the theme's palette", target=obj.id))
         z = zoom.get(obj.id, 1.0)
         if obj.kind == "text":
             fs = float(obj.payload.get("font_size", 36)) * obj.scale * z
@@ -564,8 +654,17 @@ def _lane_fidelity(scene: Scene, geo: Geometry) -> tuple[list[dict[str, Any]], l
                     w[key] = c[key]
                     if key == "max_error":
                         w["at_x"] = c.get("at_x")
+        undefined = sorted({c.get("fn") for c in list(geo.curves(obj.id)) + states
+                            if c.get("defined_fraction") == 0.0})
+        for i in undefined:
+            rng.append(_obl(scene.id, "range", "error",
+                            f"curve {i} of '{obj.id}' draws nothing: its function is undefined on "
+                            "the whole x_range (measured)", "change x_range to where the function "
+                            "is defined, or fix the expression", target=obj.id, fn=i))
         for c in worst.values():
             i = c.get("fn")
+            if i in undefined:
+                continue
             err = float(c.get("max_error", 0.0))
             if err > FIDELITY_TOLERANCE:
                 at = c.get("at_x")
@@ -587,7 +686,8 @@ def _lane_fidelity(scene: Scene, geo: Geometry) -> tuple[list[dict[str, Any]], l
 
 
 def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
-                  measurement: dict[str, Any] | None = None) -> dict[str, Any]:
+                  measurement: dict[str, Any] | None = None,
+                  theme_name: str = DEFAULT_THEME) -> dict[str, Any]:
     """Run the verification lanes.
 
     ``measurement`` is a probe report (``render.probe_scene``); without it, or if
@@ -617,8 +717,10 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
 
     # Until the scene compiles there is no geometry to measure, and estimates of a
     # scene that is about to change are noise: report the compile error alone.
-    lanes = [("legibility", _lane_legibility)] if compile_failed else \
-        [("framing", _lane_framing), ("collision", _lane_collision), ("legibility", _lane_legibility)]
+    def legibility(sc: Scene, g: Geometry) -> list[dict[str, Any]]:
+        return _lane_legibility(sc, g, theme_name)
+    lanes = [("legibility", legibility)] if compile_failed else \
+        [("framing", _lane_framing), ("collision", _lane_collision), ("legibility", legibility)]
     for lane, fn in lanes:
         lanes_run.append(lane)
         obligations.extend(fn(scene, geo))
@@ -633,7 +735,8 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
         (["framing", "collision"] if compile_failed else [])
     if geo.measured:
         limitations = ["geometry measured from the constructed Manim objects (exact boxes "
-                       "and drawn curves; checked against the default camera frame)",
+                       "and drawn curves; framing checked against the camera view while each "
+                       "object is shown)",
                        "intent lane (vision) is not available yet"]
     else:
         limitations = ["bounding boxes are estimated from the scene graph, not measured; "
