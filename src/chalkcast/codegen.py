@@ -83,7 +83,7 @@ def _cc_plot(ax, f, color, smooth=None, dx=None, clip=True):
     * dense sampling by default (600 samples over the x range), so high
       frequencies are not aliased by Manim's tick-based default;
     * jump discontinuities split the curve (separate steps, no invented riser or
-      overshoot) -- unless smooth/dx were given, which are honoured as is;
+      overshoot) -- unless smooth=True is forced, which keeps it whole;
     * poles / NaNs / values far outside y_range split the curve and the graph is
       clipped to the axes box instead of shooting off-screen.
     """
@@ -97,8 +97,15 @@ def _cc_plot(ax, f, color, smooth=None, dx=None, clip=True):
     if clip:
         margin = 0.02 * span
         ok &= (ys >= y0 - margin) & (ys <= y1 + margin)
-    jumps = fin[:-1] & fin[1:] & (np.abs(np.diff(ys)) > 0.15 * span)
-    split = smooth is None and dx is None  # fully automatic: break at the jumps
+    d = np.abs(np.diff(ys))
+    d = np.where(np.isfinite(d), d, 0.0)
+    # a jump: a big step, or a step far larger than its neighbours (floor(x) on a
+    # wide y-range jumps by only a few % of the span, but from a flat line)
+    # (immediate neighbours skipped: a jump can land on a sample, e.g. sign(0) = 0,
+    # and then takes two half-steps)
+    nb = np.maximum.reduce([np.roll(d, k) for k in (-4, -3, -2, 2, 3, 4)])
+    jumps = fin[:-1] & fin[1:] & ((d > 0.15 * span) | ((d > 0.01 * span) & (d > 8 * nb)))
+    split = smooth is not True  # only forcing smooth=True keeps a curve whole
     if smooth is None:
         smooth = not bool(jumps.any())
     if not split:
@@ -220,7 +227,9 @@ def _overlay_body(obj: Obj) -> str:
         op = float(p.get("opacity", 0.5))
         return f"{plot}_ax.get_area({helper}, x_range=[{a}, {b}], color={col}, opacity={op})"
     dx = float(p.get("dx", 0.1))
-    return (f"{plot}_ax.get_riemann_rectangles({helper}, x_range=[{a}, {b}], dx={dx}, "
+    # Manim uses np.arange(a, b, dx), which float rounding can extend by one
+    # rectangle past b; stopping half a step early keeps exactly (b - a) / dx
+    return (f"{plot}_ax.get_riemann_rectangles({helper}, x_range=[{a}, {b - dx / 2}], dx={dx}, "
             f"color={col}, fill_opacity=0.6, stroke_width=0.5, show_signed_area=False)")
 
 

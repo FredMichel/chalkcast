@@ -455,3 +455,79 @@ def test_probe_timeout_is_a_measure_warning(scene):
 def test_duplicate_targets_rejected(scene):
     t = _id(srv.add_text("A"))
     assert "duplicate" in srv.add_step("write", targets=[t, t])["error"]
+
+
+# ---- fourth audit ---------------------------------------------------------------
+
+# C1. float rounding in np.arange added a Riemann rectangle past x_max
+def test_riemann_stops_before_x_max(scene):
+    p = _id(srv.add_plot(functions=["x+1"], x_range=[0, 1.6], y_range=[0, 3]))
+    _id(srv.add_riemann(p, 1, 1.6, dx=0.2))
+    assert "x_range=[1.0, 1.5], dx=0.2" in generate_module(scene, "chalkboard")
+
+
+# C2/C3. dx no longer disables jump splitting; small jumps on a flat line are jumps
+def test_jumps_split_with_dx_and_when_small():
+    pytest.importorskip("manim")
+    import numpy as np
+    from chalkcast.codegen import _PRELUDE
+    ns: dict = {}
+    exec(_PRELUDE, ns)  # noqa: S102 - our own generated code
+    ax = ns["Axes"](x_range=[-3, 3], y_range=[-5, 5], x_length=6, y_length=4)
+    with_dx = ns["_cc_plot"](ax, lambda x: np.sign(x), "#fff", dx=0.01)
+    assert len(with_dx.submobjects) == 2
+    floor = ns["_cc_plot"](ax, lambda x: np.floor(x), "#fff")   # unit jumps = 10% of span
+    assert len(floor.submobjects) == 6
+
+
+# C4. legibility repairs account for the zoom (and never report a no-op)
+def test_legibility_fix_accounts_for_zoom(scene):
+    from chalkcast.fix import apply_fixes
+    t = _id(srv.add_text("hello", font_size=30))
+    srv.add_step("camera_move", zoom=0.5)
+    srv.add_step("write", targets=[t])
+    obl = [{"lane": "legibility", "severity": "warning", "target": t, "summary": "x"}]
+    changes, _ = apply_fixes(scene, obl, None)
+    assert changes and changes[0]["font_size"] * 0.5 >= 20
+    assert not any(o["lane"] == "legibility" for o in _lanes(scene, "warning"))
+
+
+# C5. two tweens of one parameter in a beat: the first was silently ignored
+def test_double_tween_in_a_beat_rejected(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["0*x"], x_range=[-6, 6]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="0"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=5, duration=1)
+    r = srv.add_step("tween", param="t", value=-5, duration=3, with_previous=True)
+    assert r["ok"] is False and "twice" in r["error"]
+
+
+# C6. a zoom-out after the write also counts
+def test_legibility_after_a_later_zoom_out(scene):
+    t = _id(srv.add_text("x", font_size=30))
+    srv.add_step("write", targets=[t])
+    srv.add_step("camera_move", zoom=0.4)
+    assert any(o["lane"] == "legibility" for o in _lanes(scene, "warning"))
+
+
+# C7. axis labels are checked for legibility
+def test_axis_labels_legibility(scene):
+    p = _id(srv.add_plot(functions=["x"], x_label="t", y_label="v"))
+    srv.update_object(p, scale=0.3)
+    srv.add_step("write", targets=[p])
+    assert any("axis labels" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# C8. blank text / LaTeX made invisible objects
+def test_blank_text_rejected(scene):
+    assert srv.add_text("   ")["ok"] is False
+    e = _id(srv.add_equation("a+b"))
+    assert srv.update_object(e, tex="")["ok"] is False
+
+
+# C9. estimated geometry places explicit segments by their endpoints
+def test_estimated_segment_box_uses_endpoints(scene):
+    s = _id(srv.add_shape("line", x1=5, y1=0, x2=20, y2=0))
+    srv.add_step("write", targets=[s])
+    assert any(o["lane"] == "framing" for o in inspect_scene(scene)["obligations"])

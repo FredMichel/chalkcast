@@ -20,7 +20,7 @@ from typing import Any
 
 from .geometry import SAFE_MARGIN, FRAME_HEIGHT, FRAME_WIDTH, BBox
 from .model import Scene
-from .verify import MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline
+from .verify import MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline, zoom_while_visible
 
 _SAFE_L, _SAFE_R = -FRAME_WIDTH / 2 + SAFE_MARGIN, FRAME_WIDTH / 2 - SAFE_MARGIN
 _SAFE_B, _SAFE_T = -FRAME_HEIGHT / 2 + SAFE_MARGIN, FRAME_HEIGHT / 2 - SAFE_MARGIN
@@ -196,17 +196,24 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             changes.append({"object": oid, "lane": lane, "function": i + 1, "change": what,
                             "reason": o["summary"]})
 
-        elif lane == "legibility" and obj is not None:
+        elif lane == "legibility" and obj is not None and obj.kind in ("text", "equation"):
+            z = zoom_while_visible(scene).get(oid, 1.0)  # the check divides by the zoom too
             if obj.kind == "text":
-                obj.payload["font_size"] = max(MIN_FONT_SIZE / obj.scale, float(obj.payload.get("font_size", 36)))
-                changes.append({"object": oid, "lane": lane, "font_size": obj.payload["font_size"],
-                                "reason": o["summary"]})
-            elif obj.kind == "equation":
-                # glyph size, like the check: MathTex is 48pt at scale 1
-                obj.scale = max(obj.scale, round(1.25 * MIN_FONT_SIZE / 48, 3))
-                changes.append({"object": oid, "lane": lane, "scale": obj.scale, "reason": o["summary"]})
+                old = float(obj.payload.get("font_size", 36))
+                new = max(round(1.05 * MIN_FONT_SIZE / (obj.scale * z), 1), old)
+                if new == old:
+                    unresolved.append(o)
+                    continue
+                obj.payload["font_size"] = new
+                changes.append({"object": oid, "lane": lane, "font_size": new, "reason": o["summary"]})
             else:
-                unresolved.append(o)
+                old = obj.scale
+                new = max(old, round(1.25 * MIN_FONT_SIZE / (48 * z), 3))  # MathTex: 48pt at scale 1
+                if new == old:
+                    unresolved.append(o)
+                    continue
+                obj.scale = new
+                changes.append({"object": oid, "lane": lane, "scale": new, "reason": o["summary"]})
         else:
             unresolved.append(o)
     return changes, unresolved

@@ -517,6 +517,9 @@ CASES: list[Case] = [
 
     Case(_D + "sawtooth_forced_smooth", d_sawtooth_forced_smooth, {"fidelity"}),
     Case(_D + "chirp_coarse", d_chirp_coarse, {"fidelity"}),
-    Case(_D + "staircase_coarse", d_staircase_coarse, {"fidelity"}),
+    # Relabelled clean: written when a coarse dx drew slanted ramps between the
+    # steps; curves are now split at jumps even with dx given, and the final frame
+    # shows exact horizontal steps (checked visually), so there is no defect left.
+    Case(_C + "staircase_coarse", d_staircase_coarse, set()),
     Case(_D + "beats_aliased", d_beats_aliased, {"fidelity"}),
 ]

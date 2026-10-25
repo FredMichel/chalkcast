@@ -49,6 +49,11 @@ class Obj:
 
     # ---- bounding-box estimation (Manim units) ----------------------------
     def estimate_bbox(self) -> BBox:
+        p = self.payload
+        if self.kind == "shape" and "x2" in p:  # explicit segment: from its endpoints
+            x1, y1, x2, y2 = (float(p[k]) for k in ("x1", "y1", "x2", "y2"))
+            return BBox(cx=(x1 + x2) / 2, cy=(y1 + y2) / 2,
+                        width=max(abs(x2 - x1), 0.1), height=max(abs(y2 - y1), 0.1))
         cx, cy = self.position
         w, h = self._estimate_size()
         return BBox(cx=cx, cy=cy, width=w * self.scale, height=h * self.scale)

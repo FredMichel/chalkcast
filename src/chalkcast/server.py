@@ -382,6 +382,8 @@ def add_text(text: str, x: float = 0, y: float = 0, font_size: float = 36,
         return err(ce)
     if font_size <= 0 or scale <= 0:
         return err("font_size and scale must be > 0")
+    if not text.strip():
+        return err("text is empty")
     oid = scene.new_obj_id("text")
     scene.objects.append(Obj(id=oid, kind="text", position=(x, y), color=color,
                              scale=scale, payload={"text": text, "font_size": font_size}))
@@ -670,6 +672,8 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         if obj.kind not in kinds:
             what = f"a {shape}" if obj.kind == "shape" else f"a {obj.kind}"
             return err(f"'{field}' does not apply to {what}")
+        if field in ("text", "tex") and not str(val).strip():
+            return err(f"{field} is empty")
         if rule == "pos" and val <= 0:
             return err(f"{field} must be > 0")
         if rule == "unit" and not 0 <= val <= 1:

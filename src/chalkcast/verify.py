@@ -197,7 +197,13 @@ def beat_conflicts(scene: Scene, only_step: int | None = None) -> list[str]:
     and then jumps."""
     out = []
     for beat in _beats(scene):
-        tweened = {st.param for st in beat if st.kind == "tween"}
+        if only_step is not None and only_step not in [st.index for st in beat]:
+            continue
+        params = [st.param for st in beat if st.kind == "tween"]
+        for dup in sorted({p for p in params if params.count(p) > 1}):
+            out.append(f"parameter '{dup}' is tweened twice in the same beat (only the last "
+                       "would act); chain the tweens as separate steps")
+        tweened = set(params)
         if not tweened or (only_step is not None and only_step not in [st.index for st in beat]):
             continue
         for st in beat:
@@ -377,21 +383,24 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     return out
 
 
-def _zoom_at_write(scene: Scene) -> dict[str, float]:
-    """Camera zoom when each object is first written (1 = full frame)."""
-    zoom, out = 1.0, {}
+def zoom_while_visible(scene: Scene) -> dict[str, float]:
+    """Smallest camera zoom (1 = full frame) under which each object is on screen."""
+    zoom, out, visible = 1.0, {}, set()
     for st in scene.steps:
         if st.kind == "camera_move" and st.to:
             zoom = float(st.to.partition("@")[0] or 1)
         elif st.kind == "write":
-            for t in st.targets:
-                out.setdefault(t, zoom)
+            visible.update(st.targets)
+        elif st.kind == "fade":
+            visible.difference_update(st.targets)
+        for t in visible:
+            out[t] = min(out.get(t, zoom), zoom)
     return out
 
 
 def _lane_legibility(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     out = []
-    zoom = _zoom_at_write(scene)  # a zoomed-out camera shrinks everything on screen
+    zoom = zoom_while_visible(scene)  # a zoomed-out camera shrinks everything on screen
     for obj in scene.objects:
         z = zoom.get(obj.id, 1.0)
         if obj.kind == "text":
@@ -408,7 +417,13 @@ def _lane_legibility(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"equation '{obj.id}' is too small to read (~{fs:.0f}pt)",
                                 "increase its scale", target=obj.id))
-        elif obj.kind == "plot" and obj.payload.get("show_numbers"):
+        if obj.kind == "plot" and (obj.payload.get("x_label") or obj.payload.get("y_label")):
+            fs = MATHTEX_FONT_SIZE * obj.scale * z
+            if fs < MIN_FONT_SIZE:
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"axis labels of '{obj.id}' render at ~{fs:.0f}pt (below "
+                                f"{MIN_FONT_SIZE:.0f}pt)", "increase the plot's scale", target=obj.id))
+        if obj.kind == "plot" and obj.payload.get("show_numbers"):
             fs = TICK_FONT_SIZE * obj.scale * z
             if fs < MIN_FONT_SIZE:
                 out.append(_obl(scene.id, "legibility", "warning",
@@ -596,6 +611,7 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
         limitations = ["bounding boxes are estimated from the scene graph, not measured; "
                        "framing/collision are approximate and capped at warnings",
                        "fidelity/range lanes need Manim (geometry probe) and were skipped",
+                       "shapes anchored to a plot are not placed in estimated geometry",
                        "intent lane (vision) is not available yet"]
 
     errors = [o for o in obligations if o["severity"] == "error"]

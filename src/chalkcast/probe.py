@@ -81,11 +81,12 @@ def _fidelity(ax: Any, f: Any, graph: Any) -> dict[str, Any]:
                 steps = np.abs(np.diff(fv))
                 # a discontinuity is one big step with little variation elsewhere;
                 # an oscillation the segment skips over (aliasing) varies everywhere.
-                jump = steps.max() > 0.15 * span and steps.sum() - steps.max() < steps.max()
+                jump = steps.max() > 0.01 * span and steps.sum() - steps.max() < steps.max()
                 if jump:
-                    # across a discontinuity the drawn segment may connect the two
-                    # sides, but must not leave the range the function spans there.
-                    err = max(0.0, yq - fv.max()) + max(0.0, fv.min() - yq)
+                    # a drawn segment that spans a discontinuity is a riser the function
+                    # does not have (curves are split at jumps unless smooth=True is
+                    # forced): measure the distance to the nearest true value nearby
+                    err = float(np.abs(fv - yq).min())
                 else:
                     err = abs(yq - ftrue)
                 rel = err / span
