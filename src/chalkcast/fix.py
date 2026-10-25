@@ -145,7 +145,10 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
         elif lane == "framing" and obj is not None and geo.measured and oid not in touched:
             if obj.payload.get("anchor") or "x2" in obj.payload:
                 # anchored / explicit segment: placed by plot coords or endpoints
-                unresolved.append(o)  # moves with a parameter: needs a different range
+                unresolved.append({**o, "summary": f"'{oid}' is placed by "
+                                   + ("its plot coordinates (and any parameter they follow)"
+                                      if obj.payload.get("anchor") else "its endpoints")
+                                   + ": change those; fix_scene does not move it"})
                 continue
             box = geo.bbox(oid)
             if box is None:
@@ -180,6 +183,21 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 for dep in scene.objects:
                     if dep.payload.get("plot") == obj.id:
                         dep.position = obj.position
+                # explicit segments drawn on its axes (vectors) are part of the figure
+                axes = geo.axes_box(oid)
+                for seg in scene.objects:
+                    pl = seg.payload
+                    if axes is None or "x2" not in pl or seg.id in touched:
+                        continue
+                    ends = ((pl["x1"], pl["y1"]), (pl["x2"], pl["y2"]))
+                    if all(axes.left <= ex <= axes.right and axes.bottom <= ey <= axes.top
+                           for ex, ey in ends):
+                        pl.update(x1=round(pl["x1"] + dx, 3), y1=round(pl["y1"] + dy, 3),
+                                  x2=round(pl["x2"] + dx, 3), y2=round(pl["y2"] + dy, 3))
+                        touched.add(seg.id)
+                        changes.append({"object": seg.id, "lane": lane, "endpoints":
+                                        [pl["x1"], pl["y1"], pl["x2"], pl["y2"]],
+                                        "reason": f"drawn on '{oid}', moved with it"})
             touched.add(oid)
             changes.append({"object": oid, "lane": lane, "position": list(obj.position),
                             "scale": obj.scale, "reason": o["summary"]})

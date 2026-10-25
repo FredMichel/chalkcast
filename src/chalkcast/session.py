@@ -39,6 +39,10 @@ def create_project(**kw: Any) -> Project:
     return project
 
 
+def open_project_ids() -> list[str]:
+    return list(_projects)
+
+
 def get_project(project_id: str | None = None) -> Project | None:
     pid = project_id or _current["id"]
     return _projects.get(pid) if pid else None

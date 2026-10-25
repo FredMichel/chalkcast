@@ -56,10 +56,20 @@ _STEP_ARGS: dict[str, set[str]] = {
 # helpers
 # ---------------------------------------------------------------------------
 
+def _no_project(project_id: str | None) -> str:
+    """Name the open projects: a closed or mistyped id is not 'no project'."""
+    open_ids = session.open_project_ids()
+    if project_id and open_ids:
+        return f"no open project {project_id!r} (closed or unknown); open: {', '.join(open_ids)}"
+    if project_id:
+        return f"no open project {project_id!r} (closed or unknown); call open_project"
+    return "no open project; call open_project first"
+
+
 def _require_scene(project_id: str | None, scene_id: str | None) -> tuple[Project, Scene] | dict[str, Any]:
     project = session.get_project(project_id)
     if project is None:
-        return err("no open project; call open_project first")
+        return err(_no_project(project_id))
     scene = project.get_scene(scene_id)
     if scene is None:
         if project.scenes:
@@ -265,7 +275,7 @@ def inspect_project(project_id: str | None = None) -> dict[str, Any]:
     """Current project state: scenes, objects, steps, parameters and open obligations."""
     project = session.get_project(project_id)
     if project is None:
-        return err("no open project")
+        return err(_no_project(project_id))
     # an obligation measured before later edits may no longer hold: say so
     changed = {sc.id for sc in project.scenes
                if _measured_at.get(f"{project.id}/{sc.id}") not in (None, _fingerprint(sc))}
@@ -290,7 +300,8 @@ def close_project(project_id: str | None = None) -> dict[str, Any]:
         return err(f"no open project {project_id!r}" if project_id else "no open project")
     current = session.get_project()
     return ok({"closed": True, "discarded": {"project": proj.id, "scenes": len(proj.scenes)},
-               "files_kept": str(session._base_dir() / proj.id),
+               "files_kept": str(session._base_dir() / proj.id)
+               if (session._base_dir() / proj.id).exists() else None,
                "current_project": current.id if current else None})
 
 
@@ -832,6 +843,12 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
             for dep in scene.objects:
                 if dep.payload.get("plot") == obj.id:
                     dep.position = obj.position
+    if obj.kind == "plot" and (width is not None or height is not None):
+        for dep in scene.objects:  # overlays are drawn on its axes: same size
+            if dep.payload.get("plot") == obj.id:
+                for k in ("width", "height"):
+                    if k in dep.payload:
+                        dep.payload[k] = p.get(k, dep.payload[k])
     if scale is not None:
         obj.scale = scale
         changed.append("scale")

@@ -1374,3 +1374,83 @@ def test_dollar_in_equation(scene):
     r = srv.add_equation("$x^2$ is the area")
     assert r["ok"] is False and "already math" in r["error"]
     assert srv.add_equation("\\$5")["ok"]
+
+
+# ---- sixteenth audit --------------------------------------------------------------
+
+# Q1. tick numbers are drawn in the theme ink, not Manim's white
+def test_tick_numbers_in_theme_ink():
+    srv.open_project(theme="whiteboard")
+    srv.add_scene("t")
+    sc = session.get_project().get_scene(None)
+    _id(srv.add_plot(functions=["x"], x_range=[0, 4], y_range=[0, 4], show_numbers=True))
+    from chalkcast.themes import theme
+    code = generate_module(sc, "whiteboard")
+    assert code.count(f"'color': '{theme('whiteboard')['ink']}'") >= 2 or "'group_with_commas': False, 'color'" in code
+
+
+# Q2. the highlight pulse is judged for framing
+def test_highlight_pulse_cut_at_edge(scene):
+    t = _id(srv.add_text("Highlight me", x=5.95, y=-3.4, font_size=30))
+    srv.add_step("write", targets=[t])
+    srv.add_step("highlight", targets=[t], duration=2)
+    r = _measured(scene)
+    assert any("highlight at step 2" in o["summary"] for o in r["obligations"] if o["severity"] == "error")
+
+
+# Q3. an anchored dot leaving the frame names the cause; fix_scene says why it does not move it
+def test_anchored_offscreen_names_cause(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=[{"expr": "exp(-0.3*x)*cos(3*x)"}], x_range=[0, 10],
+                         y_range=[-1.2, 1.2], width=10, height=4, y=-0.8))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="exp(-0.3*t)*cos(3*t)"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=13, duration=4)
+    r = _measured(scene)
+    err_ = [o for o in r["obligations"] if o["severity"] == "error" and o.get("target") == d]
+    assert err_ and "leaves the axes" in err_[0]["summary"]
+    assert "fix_scene can do" not in err_[0]["suggested_fix"]
+    f = srv.fix_scene()["result"]
+    assert any(d in why for why in f["not_auto_fixable"])
+
+
+# Q4. explicit segments drawn on a plot's axes move with it
+def test_fix_moves_vectors_with_their_plot(scene):
+    p = _id(srv.add_plot(x_range=[-4, 4], y_range=[-3, 3], width=10, height=6, x=2.5))
+    a = _id(srv.add_shape("arrow", x1=2.5, y1=0, x2=5.0, y2=2))
+    srv.add_step("write", targets=[p, a])
+    pytest.importorskip("manim")
+    r = srv.fix_scene()["result"]
+    moved = scene.get_obj(p).position[0] - 2.5
+    if abs(moved) > 1e-3:
+        assert scene.get_obj(a).payload["x1"] == pytest.approx(2.5 + moved, abs=1e-3)
+        assert any(c["object"] == a for c in r["changes"])
+
+
+# Q5. a closed project id says so and lists the open ones
+def test_closed_project_id():
+    a = srv.open_project()["result"]["project_id"]
+    b = srv.open_project()["result"]["project_id"]
+    srv.close_project(b)
+    r = srv.add_text("x", project_id=b)
+    assert r["ok"] is False and "closed or unknown" in r["error"] and a in r["error"]
+    assert srv.close_project(a)["result"]["files_kept"] is None
+
+
+# Q6. overlays take their plot's new size
+def test_overlay_size_follows_plot(scene):
+    p = _id(srv.add_plot(functions=["x"], width=6, height=4))
+    ar = _id(srv.add_area(plot_id=p, x_min=0, x_max=1))
+    srv.update_object(p, width=3, height=2)
+    assert scene.get_obj(ar).payload.get("width", 3) == 3
+
+
+# Q7. a tween whose only user is never shown is named
+def test_idle_tween_named(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["sin(x - t)"]))
+    tx = _id(srv.add_text("hi", y=3))
+    srv.add_step("write", targets=[tx])
+    srv.add_step("tween", param="t", value=1)
+    assert any("change nothing on screen" in o["summary"] and o["target"] == p
+               for o in _lanes(scene, "warning"))

@@ -577,6 +577,34 @@ def _where(view: BBox) -> str:
             f"{view.cx:.3g},{view.cy:.3g})")
 
 
+PULSE = 1.2  # Manim's Indicate scales its target by this much at the peak
+
+
+def _pulse_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
+    """A highlight grows its targets 1.2x about their centre for a moment: an
+    object near the edge is cut off at the peak."""
+    out, done = [], set()
+    cams = camera_by_step(scene)
+    for st in scene.steps:
+        if st.kind != "highlight":
+            continue
+        view = cams[st.index][1]
+        for oid in st.targets:
+            box = geo.bbox(oid) if geo.measured else None
+            if box is None or oid in done:
+                continue
+            big = BBox(cx=box.cx, cy=box.cy, width=box.width * PULSE, height=box.height * PULSE)
+            if (o := overflow(big, view)) > OFFSCREEN_TOLERANCE and overflow(box, view) <= OFFSCREEN_TOLERANCE:
+                done.add(oid)
+                out.append(_obl(scene.id, "framing", "error",
+                                f"the highlight at step {st.index} grows '{oid}' {PULSE}x and cuts it "
+                                f"{o:.2f} units {_where(view)} at its peak (measured)",
+                                "move it toward the center (about 10% of its size) or reduce its "
+                                "scale", target=oid, step=st.index, overflow=round(o, 3),
+                                view=[view.cx, view.cy, view.width, view.height]))
+    return out
+
+
 def _cropped_at_end(scene: Scene, geo: Geometry, oid: str) -> float | None:
     """Overflow beyond the final camera view, if ``oid`` is on screen at the end
     under a camera that moved back out to frame size or wider. Ending zoomed in on a
@@ -654,8 +682,12 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         if over is None:
             continue
         if over > OFFSCREEN_TOLERANCE:
+            placed = obj.payload.get("anchor") or "x2" in obj.payload
             out.append(_obl(scene.id, "framing", "error",
                             f"object '{oid}' extends {over:.2f} units {_where(best)} (measured)",
+                            ("it is placed by its plot coordinates/endpoints: change them, or the "
+                             "range of the parameter it follows (fix_scene cannot move it)")
+                            if placed else
                             "move it toward the center or reduce its scale (fix_scene can do "
                             "this), or move the camera", target=oid, overflow=round(over, 3),
                             view=[best.cx, best.cy, best.width, best.height]))
@@ -671,7 +703,7 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             f"object '{oid}' reaches {over + view_margin(best):.2f} units into the "
                             f"{view_margin(best):.2g}-unit safe margin (measured)",
                             "nudge it toward the center", target=oid))
-    return out
+    return out + _pulse_framing(scene, geo)
 
 
 def _first_writes(scene: Scene) -> dict[str, int]:
@@ -1190,10 +1222,16 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
             used.update(st.targets)
             if st.to:
                 used.add(st.to)
+        shown_params = set().union(*(obj_params(o, scene) for o in scene.objects if o.id in used)) \
+            if used else set()
         for o in scene.objects:
             if o.id not in used:
+                idle = sorted({st.index for st in scene.steps if st.kind == "tween"
+                               and st.param in obj_params(o, scene) - shown_params})
                 out.append(_obl(scene.id, "timing", "warning",
-                                f"object '{o.id}' is never shown (no step uses it)",
+                                f"object '{o.id}' is never shown (no step uses it)"
+                                + (f", so the tween(s) at step(s) {idle} change nothing on screen"
+                                   if idle else ""),
                                 f"add a write step for '{o.id}', or remove_object it", target=o.id))
     return out
 
@@ -1329,8 +1367,17 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
 
     # one cause, one finding: a dot that leaves the frame has left its axes too
     off = {o.get("target") for o in obligations if o["lane"] == "framing" and o["severity"] == "error"}
+    cause = {o.get("target"): o for o in obligations
+             if "leaves the axes" in o["summary"] and o.get("target") in off}
+    for o in obligations:
+        c = cause.get(o.get("target"))
+        if c and o["lane"] == "framing" and o["severity"] == "error":
+            o["summary"] += f" -- cause: {c['summary']}"
+            if c.get("step") is not None and o.get("step") is None:
+                o["step"] = c["step"]
     obligations = [o for o in obligations
-                   if not ("leaves the axes" in o["summary"] and o.get("target") in off)
+                   if not ("leaves the axes" in o["summary"] and o.get("target") in off
+                           and o["lane"] != "framing")
                    and not ("(measured path)" in o["summary"] and o.get("other") in off)]
     errors = [o for o in obligations if o["severity"] == "error"]
     warnings = [o for o in obligations if o["severity"] == "warning"]

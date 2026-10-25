@@ -336,6 +336,7 @@ def _define_plot(obj: Obj, ink: str, scene: Scene) -> list[str]:
     width = float(p.get("width", 8.0))
     height = float(p.get("height", 5.0))
     extra = ""
+    ink_c = _color(None, ink)
     if p.get("show_numbers"):
         cfg = []
         for r in (x_range, y_range):
@@ -343,7 +344,8 @@ def _define_plot(obj: Obj, ink: str, scene: Scene) -> list[str]:
             d = next((k for k in range(4) if abs(step * 10 ** k - round(step * 10 ** k)) < 1e-9), 3)
             # no thousands separators (2,000 reads as a decimal in many locales)
             cfg.append("{'include_numbers': True, 'font_size': 24, 'decimal_number_config': "
-                       f"{{'num_decimal_places': {d}, 'group_with_commas': False}}}}")
+                       f"{{'num_decimal_places': {d}, 'group_with_commas': False, "
+                       f"'color': {ink_c}}}}}")
         extra = f", x_axis_config={cfg[0]}, y_axis_config={cfg[1]}"
     lines = [
         f"{ax} = Axes(x_range={x_range}, y_range={y_range}, x_length={width}, "
