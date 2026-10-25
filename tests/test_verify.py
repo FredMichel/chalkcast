@@ -35,7 +35,8 @@ def test_framing_estimate_overflow_is_warning_not_error():
     # center in-frame but a huge estimated bbox: this is an estimate, so it must
     # be a warning (never an error), otherwise it would wrongly block export.
     scene = _scene_with(Obj(id="text_1", kind="text", position=(0, 0),
-                            payload={"text": "x" * 200, "font_size": 40}))
+                            payload={"text": "x" * 200, "font_size": 40}),
+                        steps=[("write", {"targets": ["text_1"]})])
     insp = inspect_scene(scene)
     framing = [o for o in insp["obligations"] if o["lane"] == "framing"]
     assert framing and framing[0]["severity"] == "warning"

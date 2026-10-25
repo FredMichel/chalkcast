@@ -13,6 +13,7 @@ from .model import Project
 
 _projects: dict[str, Project] = {}
 _last_render: dict[str, dict[str, Any]] = {}  # key "project/scene" -> render report
+_last_probe: dict[str, dict[str, Any]] = {}   # key "project/scene" -> geometry probe report
 _current: dict[str, str | None] = {"id": None}
 _counter = itertools.count(1)
 
@@ -44,7 +45,8 @@ def close_project(project_id: str | None = None) -> bool:
     if pid and pid in _projects:
         del _projects[pid]
         if _current["id"] == pid:
-            _current["id"] = None
+            # fall back to the most recently opened project still open, if any
+            _current["id"] = next(reversed(_projects), None)
         return True
     return False
 
@@ -55,3 +57,11 @@ def set_last_render(project_id: str, scene_id: str, report: dict[str, Any]) -> N
 
 def get_last_render(project_id: str, scene_id: str) -> dict[str, Any] | None:
     return _last_render.get(f"{project_id}/{scene_id}")
+
+
+def set_last_probe(project_id: str, scene_id: str, report: dict[str, Any]) -> None:
+    _last_probe[f"{project_id}/{scene_id}"] = report
+
+
+def get_last_probe(project_id: str, scene_id: str) -> dict[str, Any] | None:
+    return _last_probe.get(f"{project_id}/{scene_id}")

@@ -14,11 +14,12 @@ plausible script that renders wrong.
 ![status](https://img.shields.io/badge/status-alpha-orange)
 ![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)
 
-![Chalkcast demo](assets/demo.gif)
+![Chalkcast showcase](assets/showcase.gif)
 
-<sub>Authored, rendered, and verified entirely through the MCP server — Riemann
-rectangles refine and converge into the shaded area under y = x², synced with the
-typeset integral, on the chalkboard theme.</sub>
+<sub>One continuous animation, authored, verified and rendered entirely through the
+MCP server (passed on the first render): a Fourier series grows harmonic by harmonic
+into a square wave, and the Gibbs overshoot (the true one, ≈ 1.179) stays at the
+edges. Reproduce it with <code>python examples/showcase.py</code>.</sub>
 
 </div>
 
@@ -55,43 +56,90 @@ Every render returns **evidence** (the artifact + sampled frames) and a structur
 
 ## Install
 
-From source (not yet on PyPI):
+**One command** (Claude Code; needs [uv](https://docs.astral.sh/uv/)):
 
 ```bash
-git clone https://github.com/FredMichel/chalkcast.git
-cd chalkcast
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[render]"     # server + Manim
+claude mcp add chalkcast -- uvx --python 3.12 --from "chalkcast[render] @ git+https://github.com/FredMichel/chalkcast" chalkcast serve
 ```
 
-You also need **ffmpeg** (GIF/stitching) and, for equations, a **LaTeX**
-distribution (e.g. BasicTeX/TeX Live). Check what's present:
+`--python 3.12` matters: Chalkcast needs Python ≥ 3.11, and uv downloads one if the
+system Python is older (macOS ships 3.9). Then just ask in natural language.
+
+Or with pip, into any Python ≥ 3.11 environment:
 
 ```bash
-chalkcast doctor               # reports Manim / LaTeX / ffmpeg / vision providers
-chalkcast demo                 # builds + verifies + renders the demo scene
-```
-
-Register with an MCP client (e.g. Claude Code), then just ask in natural language:
-
-```bash
+pip install "chalkcast[render] @ git+https://github.com/FredMichel/chalkcast"
 claude mcp add chalkcast -- chalkcast serve
 ```
 
-> On a platform where Manim's native deps are awkward to install (e.g. an older
-> macOS without Homebrew bottles), see `scripts/dev-env.sh` and `scripts/serve.sh`,
-> which wire up a local libcairo + ffmpeg + LaTeX so the server renders anywhere.
+`[render]` brings Manim and a bundled ffmpeg. Equations also need a **LaTeX**
+distribution. `chalkcast doctor` checks everything and prints the exact fix command
+for your OS:
 
-## What the agent gets (v0.1 tools)
+```bash
+chalkcast doctor               # Manim / LaTeX / dvisvgm / physics.sty / ffmpeg
+chalkcast demo                 # builds + verifies + renders the demo scene
+```
+
+> **macOS:** `pycairo` (pulled in by Manim) has no macOS wheel and builds from
+> source, so it needs `brew install cairo pkg-config` first. On a machine where
+> Manim's native deps were built by hand, see `scripts/dev-env.sh` and
+> `scripts/serve.sh`.
+
+## What the agent gets
 
 | Group | Tools |
 |---|---|
 | **Session** | `open_project` · `inspect_project` · `close_project` |
-| **Authoring** | `add_scene` · `add_equation` · `add_plot` · `add_area` · `add_riemann` · `add_text` · `add_shape` · `add_step` |
+| **Authoring** | `add_scene` · `add_equation` · `add_plot` · `add_area` · `add_riemann` · `add_text` · `add_shape` · `add_parameter` · `add_step` |
+| **Editing** | `update_object` · `remove_object` (cascade) · `remove_step` |
+| **Verification** | `inspect_render` (measured, no video) · `fix_scene` (auto-repair) |
 | **Rendering** | `render_scene` · `render_frame` |
-| **Verification** | `inspect_render` (framing · collision · legibility · timing · compile lanes) |
-| **Export** | `export_gif` |
+| **Export** | `export_gif` (blocked while error obligations remain) |
 | **Discovery** | `inspect_environment` |
+
+- **Continuous animation:** `add_parameter("t")`, use `t` in plot expressions or
+  shape anchors (`at_x="t"`), then `add_step("tween", param="t", value=6.28)`.
+  Curves, areas and anchored dots follow it frame by frame. `with_previous=True`
+  plays a step at the same time as the one before.
+- **Fail fast, nothing implicit:** expressions are validated when authored (an AST
+  whitelist: x, math functions, `np.<fn>`, declared parameters). Colors, ranges,
+  step targets, timeline order, and arguments that don't apply to a shape or step
+  are rejected with a message saying what to do. Edits are all-or-nothing. Side
+  effects (cascade removals, regrouped steps, redeclared parameters, default
+  ranges) are reported in the result. `export_gif` refuses a render that predates
+  the latest edit. Two independent audits (39 findings) are pinned one test per
+  finding in `tests/test_ergonomics.py`.
+- **Faithful plots:** dense sampling, curves split at jumps and poles (no invented
+  risers or overshoot), clipping to the axes. A *fidelity* lane measures the drawn
+  curve against the true function. Areas and Riemann sums are refused when they
+  could not show the integral (function undefined or off the axes, y = 0 not
+  visible).
+
+### How verification works
+
+`inspect_render` builds the real Manim objects without encoding video (1–3 s) and
+**measures** them: exact bounding boxes, curve and axis ink, the drawn-vs-true error
+of every graph, and a strict LaTeX compile (Manim's batch mode silently "recovers"
+from LaTeX errors). Lanes: framing · collision · legibility · timing · compile ·
+fidelity · range. `fix_scene` repairs the mechanical problems (moves, rescales,
+resampling) and leaves the rest as obligations for the agent.
+
+Measured on labelled scenes (`chalkcast bench`, `chalkcast bench --holdout N`).
+Each held-out set was written and labelled (and checked frame by frame) by an
+author who never read the verifier. **The first run of each set is the honest
+out-of-sample figure**:
+
+| Set | Cases | First run: detection / false positives | Bugs that run exposed |
+|---|---|---|---|
+| Held-out 1 | 39 (24 defective) | 95.8 % / 7.7 % | over-strict safe margin; aliasing taken for a jump |
+| Held-out 2 | 47 (31 defective) | 90.3 % / 12.8 % | estimated noise after a compile error; straight arrows and box sides sampled only at their ends; equation size judged by box height |
+| Held-out 3 | 44 (26 defective) | **96.2 % / 0 %** | an arrow's shaft was never sampled (only its tip) |
+
+After each set's bugs were fixed, every set (and the 40-case development set)
+scores 100 % / 0 %. From then on they are regression tests (`tests/test_measured.py`),
+not independent measures. Held-out 3 was written after the fixes for sets 1 and 2
+and run once, untouched: it is the current out-of-sample estimate.
 
 ## Example (what the agent does)
 
@@ -105,14 +153,18 @@ add_step("write", targets=["text_1"])
 add_step("write", targets=["plot_1"])
 add_step("write", targets=["equation_1"])
 add_step("highlight", targets=["equation_1"])
+inspect_render()    # -> measured verdict in ~2 s, no video
+fix_scene()         # -> repairs framing / collision / fidelity if needed
 render_scene()      # -> video + frames + verdict + obligations
 export_gif()        # -> shareable GIF (blocked if error obligations remain)
 ```
 
 ## Status
 
-v0.1 baseline. Vision-based `intent` verification and auto-`fix_scene` land in v0.2
-(see the roadmap in [`docs/SPEC.md`](docs/SPEC.md)).
+Alpha. Scientific correctness is tested numerically (`tests/test_science.py`): shaded
+areas equal their integrals, Riemann rectangles their sum, drawn curves their
+function (including sin 30x), and the Gibbs peak its theoretical value. Not yet on
+PyPI. Vision-based `intent` verification is next (see [`docs/SPEC.md`](docs/SPEC.md)).
 
 ## License
 

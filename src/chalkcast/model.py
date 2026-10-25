@@ -100,7 +100,8 @@ class Obj:
 # Timeline steps
 # ---------------------------------------------------------------------------
 
-StepKind = Literal["write", "transform", "highlight", "fade", "camera_move", "wait"]
+StepKind = Literal["write", "transform", "highlight", "fade", "camera_move", "wait", "tween"]
+STEP_KINDS = ("write", "transform", "highlight", "fade", "camera_move", "wait", "tween")
 
 # Steps that bring an object on screen for the first time.
 INTRODUCING = {"write"}
@@ -114,9 +115,14 @@ class Step:
     to: str | None = None  # for transform: target object id to morph into
     duration: float = 1.0
     note: str = ""  # declared intent, consumed by the (future) vision lane
+    # play together with the previous step's animations (simultaneous beats)
+    with_previous: bool = False
+    # for tween: animate scene parameter `param` continuously to `value`
+    param: str | None = None
+    value: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "index": self.index,
             "kind": self.kind,
             "targets": self.targets,
@@ -124,6 +130,11 @@ class Step:
             "duration": self.duration,
             "note": self.note,
         }
+        if self.with_previous:
+            d["with_previous"] = True
+        if self.kind == "tween":
+            d["param"], d["value"] = self.param, self.value
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +148,8 @@ class Scene:
     title: str = ""
     objects: list[Obj] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
+    # continuous parameters (Manim ValueTrackers) usable in plot/anchor expressions
+    params: dict[str, float] = field(default_factory=dict)
     _obj_counter: Any = field(default_factory=lambda: itertools.count(1), repr=False)
 
     def class_name(self) -> str:
@@ -155,8 +168,37 @@ class Scene:
         self.steps.append(step)
         return step
 
+    def steps_referencing(self, obj_id: str) -> list[int]:
+        return [s.index for s in self.steps if obj_id in s.targets or s.to == obj_id]
+
+    def dependents(self, obj_id: str) -> list[str]:
+        """Objects built on top of ``obj_id`` (areas/riemann/anchored shapes on a plot)."""
+        out = []
+        for o in self.objects:
+            if o.payload.get("plot") == obj_id or (o.payload.get("anchor") or {}).get("plot") == obj_id:
+                out.append(o.id)
+        return out
+
+    def remove_obj(self, obj_id: str) -> None:
+        self.objects = [o for o in self.objects if o.id != obj_id]
+
+    def remove_step(self, index: int) -> None:
+        self.steps = [s for s in self.steps if s.index != index]
+        for i, s in enumerate(self.steps, start=1):
+            s.index = i
+
     def duration(self) -> float:
-        return sum(s.duration for s in self.steps) or 1.0
+        """Timeline length: a with_previous step runs inside the previous play, whose
+        length is its longest animation (matches codegen's grouping)."""
+        total, group = 0.0, 0.0
+        for s in self.steps:
+            if s.with_previous and s.kind != "wait" and group:
+                total += max(0.0, s.duration - group)
+                group = max(group, s.duration)
+            else:
+                total += s.duration
+                group = 0.0 if s.kind == "wait" else s.duration
+        return total or 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -165,6 +207,7 @@ class Scene:
             "class_name": self.class_name(),
             "objects": [o.to_dict() for o in self.objects],
             "steps": [s.to_dict() for s in self.steps],
+            "params": dict(self.params),
             "duration": self.duration(),
         }
 
@@ -172,7 +215,7 @@ class Scene:
 @dataclass
 class Project:
     id: str
-    quality: Literal["draft", "low", "medium", "high"] = "low"
+    quality: Literal["low", "medium", "high"] = "low"
     fps: int = 30
     theme: str = "chalkboard"
     scenes: list[Scene] = field(default_factory=list)

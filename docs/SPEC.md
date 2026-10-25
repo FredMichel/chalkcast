@@ -5,7 +5,8 @@
 > verifies a [Manim](https://www.manim.community/) animation — then self-corrects
 > until the frame actually matches the intent.
 
-- **Status:** Draft v0.1 — design baseline, pre-implementation.
+- **Status:** v0.1 implemented, plus measured verification, `fix_scene`, editing
+  tools and continuous parameters (see roadmap).
 - **Audience:** educators, students, STEM content creators, and the agents working for them.
 - **License (intended):** MIT.
 - **Positioning:** Chalkcast is a *bridge between agents and Manim*. It is not "a
@@ -331,7 +332,18 @@ Chalkcast installs nothing without consent and reports its environment via
 1. **v0.1 — Baseline:** project/scene model, Layer A primitives (equation, plot,
    text, shape, step), `render_scene`/`render_frame`, `inspect_render` with
    geometry lanes, `export_gif`. Ship the killer-demo GIF in the README.
-2. **v0.2 — Vision verification:** the `intent` lane + `fix_scene` auto-repairs.
+   *Done.*
+   - **v0.1.x — Measured verification (done):** a geometry probe builds the
+     real Mobjects without rendering and measures bboxes, ink, drawn-vs-true
+     fidelity, and strict LaTeX.
+   - Timeline-aware collisions; `fix_scene` auto-repairs.
+   - Editing tools (`update_object`, `remove_object`, `remove_step`).
+   - Continuous parameters (`add_parameter` + `tween`, anchored shapes,
+     `with_previous`).
+   - Verdict benchmark plus a held-out set (`chalkcast bench [--holdout]`).
+   - Numerically checked reference scenes (`tests/test_science.py`).
+2. **v0.2 — Vision verification:** the `intent` lane (does the frame show what was
+   meant?).
 3. **v0.3 — Full project renders:** multi-scene stitching, transitions library,
    theme presets beyond the chalkboard look.
 4. **v0.4 — CLI parity + generated catalog** (`chalkcast` CLI, `list_capabilities`).

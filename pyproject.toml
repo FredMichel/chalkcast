@@ -21,13 +21,14 @@ classifiers = [
 ]
 dependencies = [
   "mcp[cli]>=1.2.0",
+  "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
 # Manim is a heavy, system-dependent install (cairo, pango, ffmpeg, a LaTeX
 # distribution for math). Kept optional so the server imports and the authoring
 # layer works even on a machine without a render engine.
-render = ["manim>=0.18.0"]
+render = ["manim>=0.18.0", "imageio-ffmpeg>=0.4"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
