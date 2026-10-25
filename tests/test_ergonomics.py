@@ -782,3 +782,92 @@ def test_stale_flag_in_both_copies(scene):
     srv.update_object(t, x=0)
     r = srv.inspect_project()
     assert all(o.get("stale") for o in r["result"]["open_obligations"])
+
+
+# ---- eighth audit ---------------------------------------------------------------
+
+# G1. a transformed object re-written after a fade shows its new shape
+def test_rewrite_after_transform_keeps_new_shape(scene):
+    a = _id(srv.add_text("ORIGINAL", y=2))
+    b = _id(srv.add_text("REPLACED", y=-2))
+    c = _id(srv.add_text("caption", y=-2))
+    srv.add_step("write", targets=[a])
+    srv.add_step("transform", targets=[a], to=b)
+    srv.add_step("fade", targets=[a])
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[c])
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" for o in r["obligations"])
+
+
+# G2. a camera that follows a moving dot keeps it framed
+def test_camera_tracking_a_moving_dot(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["0*x"]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="1"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=20, duration=3)
+    srv.add_step("camera_move", zoom=1, focus_x=16, focus_y=0, duration=3, with_previous=True)
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o["lane"] == "framing" and o.get("target") == d
+                and o["severity"] == "error"]
+
+
+# G3. text on a moving plot's axes is caught even when first shown after a tween
+def test_static_axes_checked_after_tween(scene):
+    srv.add_parameter("a", 1)
+    p = _id(srv.add_plot(functions=["a*x"]))
+    t = _id(srv.add_text("label here", x=0, y=2))
+    srv.add_step("tween", param="a", value=0.2)
+    srv.add_step("write", targets=[p, t])
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" for o in r["obligations"])
+
+
+# G4. edits are not refused on parameter values the overlay is never shown at
+def test_overlay_edits_follow_shown_values(scene):
+    srv.add_parameter("a", 0.5)
+    p = _id(srv.add_plot(functions=["a*x**2"], x_range=[-3, 3], y_range=[0, 4]))
+    ar = _id(srv.add_area(p, 0, 2))
+    srv.add_parameter("a", 5)
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="a", value=0.5)
+    srv.add_step("write", targets=[ar])
+    assert srv.update_object(ar, color="RED")["ok"]
+    assert not any(o.get("target") == ar for o in inspect_scene(scene)["obligations"]
+                   if o["severity"] == "error")
+    assert srv.add_area(p, 0, 2)["ok"]  # y = 0 visible: still checked at add time
+
+
+# G5. moving-curve collisions follow the shape a label shows after a transform
+def test_moving_collision_uses_transformed_label(scene):
+    srv.add_parameter("a", -2)
+    p = _id(srv.add_plot(functions=["0*x+a"], x_range=[-5, 5], y_range=[-3, 3]))
+    a = _id(srv.add_text("A", x=2.5, y=3.3))
+    b = _id(srv.add_text("B", x=2.5, y=0.8))
+    srv.add_step("write", targets=[p, a])
+    srv.add_step("transform", targets=[a], to=b)
+    srv.add_step("tween", param="a", value=2)
+    r = _measured(scene)
+    hits = [o for o in r["obligations"] if o["lane"] == "collision"]
+    assert hits and all(o["target"] == b for o in hits)
+
+
+# G6. zoom applies to a transform destination's legibility
+def test_zoom_applies_to_transform_destination(scene):
+    a = _id(srv.add_text("A", font_size=48))
+    b = _id(srv.add_text("B", font_size=30))
+    srv.add_step("camera_move", zoom=0.5)
+    srv.add_step("write", targets=[a])
+    srv.add_step("transform", targets=[a], to=b)
+    assert any(o["lane"] == "legibility" and o["target"] == b for o in _lanes(scene, "warning"))
+
+
+# G7. an anchored dot leaving its axes is flagged
+def test_anchor_leaving_axes(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["x**2"], x_range=[0, 3], y_range=[0, 4]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="t**2"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=2.8)
+    assert any("leaves the axes" in o["summary"] for o in _lanes(scene, "warning"))

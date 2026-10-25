@@ -294,7 +294,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
             elif o["kind"] == "shape":
                 ink_at[o["id"]] = _ink(m, o["kind"])
         if boxes:
-            states.append({"step": st["step"], "params": st["params"], "objects": boxes,
+            states.append({"step": st["step"], "params": st["params"], "frac": st.get("frac", 1.0),
+                           "objects": boxes,
                            "ink": ink_at, "curves": curves_at, "beat_end": st.get("beat_end", False)})
     return {"ok": True, "objects": objects, "plots": plots, "ink": ink, "states": states}
 

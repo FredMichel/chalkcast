@@ -14,6 +14,8 @@ plausible script that renders wrong.
 ![status](https://img.shields.io/badge/status-alpha-orange)
 ![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)
 
+<!-- mcp-name: io.github.FredMichel/chalkcast -->
+
 ![Chalkcast showcase](assets/showcase.gif)
 
 <sub>One continuous animation, authored, verified and rendered entirely through the
@@ -108,7 +110,7 @@ chalkcast demo                 # builds + verifies + renders the demo scene
   are rejected with a message saying what to do. Edits are all-or-nothing. Side
   effects (cascade removals, regrouped steps, redeclared parameters, default
   ranges) are reported in the result. `export_gif` refuses a render that predates
-  the latest edit. Seven independent audits (22, then 17, 14, 8, 4, 9 and 4 findings) are
+  the latest edit. Eight independent audits (22, then 17, 14, 8, 4, 9, 4 and 7 findings) are
   pinned one test per finding in `tests/test_ergonomics.py`.
 - **Faithful plots:** dense sampling, curves split at jumps and poles (no invented
   risers or overshoot), clipping to the axes. A *fidelity* lane measures the drawn

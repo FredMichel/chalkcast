@@ -110,16 +110,6 @@ class Geometry:
                 seen.append(st)
         return initial, seen
 
-    def boxes_while(self, oid: str, steps: set[int]) -> list[BBox]:
-        """Every measured box of ``oid`` that is on screen at some point."""
-        initial, states = self.states_while(oid, steps)
-        out = [b for b in [self.bbox(oid)] if b] if initial else []
-        for st in states:
-            b = self._box(st["objects"].get(oid))
-            if b:
-                out.append(b)
-        return out
-
     def undefined(self, oid: str, steps: set[int]) -> bool:
         """Measured with no finite point (e.g. a dot anchored at log(-2)) while shown."""
         if not self.measured:
@@ -133,6 +123,10 @@ class Geometry:
     def moving_points(self, oid: str) -> list[list[float]]:
         """Every position a moving curve/shape takes during the tweens (measured)."""
         return [p for st in self._states for p in st.get("ink", {}).get(oid, [])]
+
+    def axes_points(self, plot_id: str) -> list[list[float]]:
+        """The axes' own ink (lines, ticks, labels): it does not move with parameters."""
+        return list(self._plots.get(plot_id, {}).get("axes_points", []))
 
     def curve_points(self, plot_id: str) -> list[list[float]]:
         """Everything a label must not sit on: the curves and the axes' own ink."""
@@ -156,15 +150,17 @@ def timeline(scene: Scene) -> list[dict[str, str]]:
     """Visible objects after each step, as {object id: id of the shape it shows}."""
     defined = {o.id for o in scene.objects}
     visible: dict[str, str] = {}
+    shape: dict[str, str] = {}  # a transformed object keeps its new shape, even re-written
     states: list[dict[str, str]] = []
     for st in scene.steps:
         if st.kind == "write":
             for t in st.targets:
                 if t in defined:
-                    visible[t] = t
+                    visible[t] = shape.get(t, t)
         elif st.kind == "transform" and st.targets and st.to in defined:
             if st.targets[0] in visible:
                 visible[st.targets[0]] = st.to  # Transform keeps the source, reshaped
+                shape[st.targets[0]] = st.to
         elif st.kind == "fade":
             for t in st.targets:
                 visible.pop(t, None)
@@ -306,7 +302,7 @@ def param_moments(scene: Scene, samples: int = 8) -> list[tuple[dict[str, float]
 
 
 def overlay_error(scene: Scene, plot: Obj, fn_index: int, x_min: float, x_max: float,
-                  kind: str, params: dict[str, float]) -> str | None:
+                  kind: str, params: dict[str, float], axis_only: bool = False) -> str | None:
     """An area/Riemann sum only shows its integral if the x-axis (y = 0) is on the
     axes and the function, at these parameter values, stays inside y_range over
     the interval."""
@@ -316,7 +312,7 @@ def overlay_error(scene: Scene, plot: Obj, fn_index: int, x_min: float, x_max: f
         return (f"the {kind} is measured from y = 0, which is outside the y_range [{y0}, {y1}] "
                 f"of '{plot.id}'; include 0 in y_range")
     fns = plot.payload.get("functions", [])
-    if not 1 <= fn_index <= len(fns):
+    if axis_only or not 1 <= fn_index <= len(fns):
         return None
     fn = fns[fn_index - 1]
     f = compile_fn(str(fn["expr"] if isinstance(fn, dict) else fn), params)
@@ -370,6 +366,33 @@ def _lane_overlays(scene: Scene) -> list[dict[str, Any]]:
                                 "change the parameter's value/tween range, y_range or the interval",
                                 target=obj.id))
                 break
+    for obj in scene.objects:
+        a = obj.payload.get("anchor")
+        plot = scene.get_obj(a.get("plot", "")) if a else None
+        if plot is None or obj.id not in vis:
+            continue
+        steps = {i for i, _ in vis[obj.id]}
+        (x0, x1), (y0, y1) = ((float(v) for v in plot.payload.get(k, d)[:2])
+                              for k, d in (("x_range", [-5, 5]), ("y_range", [-3, 3])))
+        import numpy as np
+        fx, fy = compile_fn(str(a["x"]), scene.params), compile_fn(str(a["y"]), scene.params)
+        for vals, window in moments:
+            if not (window & steps):
+                continue
+            try:
+                with np.errstate(all="ignore"):
+                    px, py = float(fx(0.0, **vals)), float(fy(0.0, **vals))
+            except Exception:  # noqa: BLE001 - undefined: reported by framing
+                continue
+            mx, my = 0.02 * (x1 - x0), 0.02 * (y1 - y0)
+            if px == px and py == py and not (x0 - mx <= px <= x1 + mx and y0 - my <= py <= y1 + my):
+                at = ", ".join(f"{k}={v:.3g}" for k, v in vals.items() if k in obj_params(obj, scene))
+                out.append(_obl(scene.id, "range", "warning",
+                                f"'{obj.id}' leaves the axes of '{plot.id}'{f' at {at}' if at else ''}: "
+                                f"it is at ({px:.3g}, {py:.3g}), outside x_range [{x0}, {x1}] / "
+                                f"y_range [{y0}, {y1}], detached from the drawn plot",
+                                "widen the plot's ranges or limit the parameter", target=obj.id))
+                break
     return out
 
 
@@ -382,21 +405,77 @@ def unused_tweens(scene: Scene) -> list[int]:
 DEFAULT_VIEW = BBox(cx=0.0, cy=0.0, width=FRAME_WIDTH, height=FRAME_HEIGHT)
 
 
-def visible_views(scene: Scene) -> dict[str, list[tuple[int, BBox]]]:
-    """For each shown geometry: (step index, camera frame) at every step it is on
-    screen. camera_move zoom is absolute; a move without focus keeps the centre."""
+def camera_by_step(scene: Scene) -> dict[int, tuple[BBox, BBox]]:
+    """Camera frame before and after each step. camera_move zoom is absolute; a
+    move without focus keeps the centre."""
     zoom, cx, cy = 1.0, 0.0, 0.0
-    out: dict[str, list[tuple[int, BBox]]] = {}
-    for st, shown in zip(scene.steps, timeline(scene)):
+    out: dict[int, tuple[BBox, BBox]] = {}
+    for st in scene.steps:
+        before = BBox(cx=cx, cy=cy, width=FRAME_WIDTH / zoom, height=FRAME_HEIGHT / zoom)
         if st.kind == "camera_move" and st.to:
             z, _, xy = st.to.partition("@")
             fx, _, fy = xy.partition(",")
             zoom = float(z or 1)
             if fx != "" and fy != "":
                 cx, cy = float(fx), float(fy)
-        view = BBox(cx=cx, cy=cy, width=FRAME_WIDTH / zoom, height=FRAME_HEIGHT / zoom)
-        for g in shown.values():
-            out.setdefault(g, []).append((st.index, view))
+        out[st.index] = (before, BBox(cx=cx, cy=cy, width=FRAME_WIDTH / zoom, height=FRAME_HEIGHT / zoom))
+    return out
+
+
+def visible_views(scene: Scene) -> dict[str, list[tuple[int, BBox]]]:
+    """For each shown geometry: (step index, camera frame after it) at every step
+    it is on screen."""
+    cams = camera_by_step(scene)
+    out: dict[str, list[tuple[int, BBox]]] = {}
+    for st, shown in zip(scene.steps, timeline(scene)):
+        for g in dict.fromkeys(shown.values()):
+            out.setdefault(g, []).append((st.index, cams[st.index][1]))
+    return out
+
+
+def _lerp_view(a: BBox, b: BBox, f: float) -> BBox:
+    return BBox(cx=a.cx + (b.cx - a.cx) * f, cy=a.cy + (b.cy - a.cy) * f,
+                width=a.width + (b.width - a.width) * f, height=a.height + (b.height - a.height) * f)
+
+
+def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
+                     seen: list[tuple[int, BBox]]) -> list[tuple[BBox, list[BBox]]]:
+    """Each measured box of ``oid`` with the camera frames it is on screen under:
+    its first state under the views of the steps before any tween (all its steps if
+    it never moves); a tween frame under the camera at that moment (a camera_move
+    in the same beat is interpolated); where a tween lands, under the views of
+    the steps until the next tween."""
+    steps = {i for i, _ in seen}
+    end_view = dict(seen)
+    obj = scene.get_obj(oid)
+    dynamic = obj is not None and is_dynamic(obj, scene)
+    initial, states = geo.states_while(oid, steps)
+    out: list[tuple[BBox, list[BBox]]] = []
+    box = geo.bbox(oid)
+    if initial and box:
+        init_steps = steps & initial_window(scene) if dynamic and scene.steps else steps
+        out.append((box, [end_view[i] for i in sorted(init_steps)] or [DEFAULT_VIEW]))
+    windows, cams = _beat_windows(scene), camera_by_step(scene)
+    by_index = {s.index: s for s in scene.steps}
+    for st in states:
+        b = geo._box(st["objects"].get(oid))
+        if not b:
+            continue
+        during, after = windows.get(int(st.get("step", 0)), ([], []))
+        views: list[BBox] = []
+        if any(i in steps for i in during):
+            cam = [by_index[i] for i in during if by_index[i].kind == "camera_move" and by_index[i].to]
+            if cam:
+                tween_t = max(by_index[i].duration for i in during if by_index[i].kind == "tween")
+                c = cam[-1]
+                f = min(1.0, float(st.get("frac", 1.0)) * tween_t / max(c.duration, 1e-9))
+                views.append(_lerp_view(cams[during[0]][0], cams[c.index][1], f))
+            else:
+                views += [end_view[i] for i in during if i in steps]
+        if st.get("beat_end"):
+            views += [end_view[i] for i in after if i in steps]
+        if views:
+            out.append((b, views))
     return out
 
 
@@ -456,11 +535,14 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             "undefined there, e.g. log of a negative number) and is not drawn",
                             "change its anchor expression or the parameter range", target=oid))
             continue
-        boxes = geo.boxes_while(oid, steps)
-        if not boxes:
+        # every measured position must be fully seen at some moment it is shown
+        over, best = None, DEFAULT_VIEW
+        for b, vs in _framing_entries(scene, geo, oid, seen):
+            v = min(vs, key=lambda v: overflow(b, v))
+            if over is None or overflow(b, v) > over:
+                over, best = overflow(b, v), v
+        if over is None:
             continue
-        best = min(views, key=lambda v: max(overflow(b, v) for b in boxes))
-        over = max(overflow(b, best) for b in boxes)
         if over > OFFSCREEN_TOLERANCE:
             out.append(_obl(scene.id, "framing", "error",
                             f"object '{oid}' extends {over:.2f} units {_where(best)} (measured)",
@@ -483,8 +565,9 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
     values (geometry here is measured there; tween states are checked separately)."""
     if a.kind in ("area", "riemann") or b.kind in ("area", "riemann"):
         return None  # fills sit on their plot by design
-    if not initial and (is_dynamic(a, scene) or is_dynamic(b, scene)):
-        return None  # never together where the moving one started
+    static_only = not initial and (is_dynamic(a, scene) or is_dynamic(b, scene))
+    # never together where the moving one started: only what does not move (a
+    # plot's axes and labels) is checked here; the moving parts per tween state
     ka, kb = a.kind, b.kind
     ba, bb = geo.bbox(a.id), geo.bbox(b.id)
     if ba is None or bb is None:
@@ -513,7 +596,10 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
     if ka in TEXTLIKE or kb in TEXTLIKE:
         txt, other = (a, b) if ka in TEXTLIKE else (b, a)
         tbox = geo.bbox(txt.id)
-        pts = geo.curve_points(other.id) if other.kind == "plot" else geo.ink(other.id)
+        if static_only and other.kind != "plot":
+            return None
+        pts = (geo.axes_points(other.id) if static_only else geo.curve_points(other.id)) \
+            if other.kind == "plot" else geo.ink(other.id)
         hits = sum(1 for p in pts if _inside(p, tbox))
         if hits:
             what = "the curves/axes of" if other.kind == "plot" else "the outline of"
@@ -524,6 +610,8 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if xa and xb and all(abs(u - v) < 0.05 for u, v in
                              ((xa.left, xb.left), (xa.right, xb.right), (xa.bottom, xb.bottom), (xa.top, xb.top))):
             return None  # curves sharing the same axes
+        if static_only:
+            ba, bb = xa or ba, xb or bb  # the axes stay put; curves move
         ov = ba.overlap_area(bb)
         ratio = ov / min(ba.area, bb.area) if ov > 0 else 0
         if ratio >= MEASURED_TEXT_OVERLAP:
@@ -569,7 +657,7 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
             for i in steps:
                 if mover in tl[i - 1].values():
                     shown.update(tl[i - 1])
-            for tid in shown:
+            for tid in dict.fromkeys(shown.values()):  # the shape each label shows
                 tobj = scene.get_obj(tid)
                 if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in seen:
                     continue
@@ -586,16 +674,12 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
 
 def zoom_while_visible(scene: Scene) -> dict[str, float]:
     """Smallest camera zoom (1 = full frame) under which each object is on screen."""
-    zoom, out, visible = 1.0, {}, set()
-    for st in scene.steps:
-        if st.kind == "camera_move" and st.to:
-            zoom = float(st.to.partition("@")[0] or 1)
-        elif st.kind == "write":
-            visible.update(st.targets)
-        elif st.kind == "fade":
-            visible.difference_update(st.targets)
-        for t in visible:
-            out[t] = min(out.get(t, zoom), zoom)
+    out: dict[str, float] = {}
+    cams = camera_by_step(scene)
+    for st, shown in zip(scene.steps, timeline(scene)):
+        zoom = FRAME_WIDTH / cams[st.index][1].width
+        for g in shown.values():  # a transform destination is shown through its source
+            out[g] = min(out.get(g, zoom), zoom)
     return out
 
 
@@ -877,6 +961,10 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
                        "shapes anchored to a plot are not placed in estimated geometry",
                        "intent lane (vision) is not available yet"]
 
+    # one cause, one finding: a dot that leaves the frame has left its axes too
+    off = {o.get("target") for o in obligations if o["lane"] == "framing" and o["severity"] == "error"}
+    obligations = [o for o in obligations
+                   if not ("leaves the axes" in o["summary"] and o.get("target") in off)]
     errors = [o for o in obligations if o["severity"] == "error"]
     warnings = [o for o in obligations if o["severity"] == "warning"]
     score = max(0.0, 1.0 - 0.25 * len(errors) - 0.1 * len(warnings))

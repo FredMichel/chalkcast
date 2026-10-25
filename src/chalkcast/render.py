@@ -97,7 +97,8 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
         for k in range(1, TWEEN_SAMPLES + 1):
             a = k / TWEEN_SAMPLES
             vals = {**start, **{p: start[p] + a * (v - start[p]) for p, v in beat.items()}}
-            states.append({"step": beat_step, "params": vals, "beat_end": k == TWEEN_SAMPLES})
+            states.append({"step": beat_step, "params": vals, "frac": a,
+                           "beat_end": k == TWEEN_SAMPLES})
         cur.update(beat)
         beat.clear()
 

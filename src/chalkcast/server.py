@@ -34,7 +34,7 @@ from .envelope import err, ok
 from .expr import ExprError, validate
 from .fix import apply_fixes
 from .model import STEP_KINDS, Obj, Project, Scene
-from .verify import overlay_error, GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
+from .verify import obj_params, overlay_error, GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
 
 mcp = _Server("chalkcast")
 
@@ -155,8 +155,11 @@ def _interval_error(plot: Obj, x_min: float, x_max: float) -> str | None:
 
 def _overlay_error(scene: Scene, plot: Obj, fn_index: int, x_min: float, x_max: float,
                    kind: str) -> str | None:
-    """At the parameters' current values (verification re-checks every tween state)."""
-    return overlay_error(scene, plot, fn_index, x_min, x_max, kind, scene.params)
+    """Refuse what can never show the integral. A parameter-driven curve depends on
+    the timeline (redeclarations, tweens), so its values are checked by verification
+    at the parameter values the overlay is actually shown at, not here."""
+    return overlay_error(scene, plot, fn_index, x_min, x_max, kind, scene.params,
+                         axis_only=bool(obj_params(plot, scene)))
 
 
 def _anchor_error(expr: str, axis: str) -> str | None:
