@@ -104,6 +104,18 @@ def _range_error(r: list[float] | None, name: str) -> str | None:
     return None
 
 
+def _tex_specials(tex: str) -> str | None:
+    """LaTeX special characters that silently break an equation: % starts a comment
+    (the rest of the line vanishes), # is a macro parameter."""
+    import re as _re
+    for ch, name in (("%", "a percent sign"), ("#", "a hash sign")):
+        if _re.search(r"(?<!\\)" + _re.escape(ch), tex):
+            return (f"unescaped '{ch}' in LaTeX: write \\{ch} for {name} ('{ch}' alone "
+                    + ("starts a comment that swallows the rest of the line)" if ch == "%"
+                       else "is a macro parameter)"))
+    return None
+
+
 def _with_ticks(r: list[float] | None, default: list[float]) -> list[float]:
     """[min, max] -> [min, max, step] with a readable step (about 5-10 ticks)."""
     if r is None:
@@ -114,6 +126,7 @@ def _with_ticks(r: list[float] | None, default: list[float]) -> list[float]:
     raw = span / 8
     mag = 10 ** __import__("math").floor(__import__("math").log10(raw))
     step = next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)
+    step = int(round(step)) if abs(step - round(step)) < 1e-9 else step  # 1, not 1.0
     return [r[0], r[1], step]
 
 
@@ -236,12 +249,17 @@ def inspect_project(project_id: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def close_project(project_id: str | None = None) -> dict[str, Any]:
-    """Release a project session (default: the current one). If others are open, the
-    most recently opened becomes current; the result names it."""
-    if not session.close_project(project_id):
+    """Release a project session (default: the current one). Its scenes, objects
+    and steps are discarded and cannot be reopened (rendered files stay on disk,
+    listed in the result). If others are open, the most recently opened becomes
+    current; the result names it."""
+    proj = session.get_project(project_id)
+    if proj is None or not session.close_project(project_id):
         return err(f"no open project {project_id!r}" if project_id else "no open project")
     current = session.get_project()
-    return ok({"closed": True, "current_project": current.id if current else None})
+    return ok({"closed": True, "discarded": {"project": proj.id, "scenes": len(proj.scenes)},
+               "files_kept": str(session._base_dir() / proj.id),
+               "current_project": current.id if current else None})
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +317,8 @@ def add_equation(tex: str, x: float = 0, y: float = 0, color: str | None = None,
         return err(ce)
     if not tex.strip():
         return err("tex is empty")
+    if (e := _tex_specials(tex)):
+        return err(e)
     if scale <= 0:
         return err("scale must be > 0")
     oid = scene.new_obj_id("equation")
@@ -668,6 +688,8 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
             return err(f"'{field}' does not apply to {what}")
         if field in ("text", "tex") and not str(val).strip():
             return err(f"{field} is empty")
+        if field == "tex" and (e := _tex_specials(str(val))):
+            return err(e)
         if rule == "pos" and val <= 0:
             return err(f"{field} must be > 0")
         if rule == "unit" and not 0 <= val <= 1:

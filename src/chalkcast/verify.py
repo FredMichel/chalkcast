@@ -25,7 +25,7 @@ from typing import Any
 from .geometry import FRAME_HEIGHT, FRAME_WIDTH, SAFE_MARGIN, BBox
 from .codegen import _COLOR_HEX, plot_is_dynamic, uses_params
 from .expr import compile_fn
-from .model import Obj, Scene
+from .model import Obj, Scene, tween_fractions
 from .themes import DEFAULT_THEME, theme
 
 COLLISION_THRESHOLD = 0.35   # estimated mode: overlap / smaller area
@@ -297,7 +297,7 @@ def initial_window(scene: Scene) -> set[int]:
     return out
 
 
-def param_moments(scene: Scene, samples: int = 8) -> list[tuple[dict[str, float], set[int]]]:
+def param_moments(scene: Scene) -> list[tuple[dict[str, float], set[int]]]:
     """Parameter values the timeline passes through, each with the steps during
     which they are on screen: the declared values, then samples of every tween."""
     vals = dict(scene.params)
@@ -310,13 +310,14 @@ def param_moments(scene: Scene, samples: int = 8) -> list[tuple[dict[str, float]
         during, after = windows[tweens[0].index]
         old = dict(vals)
         total = max(float(st.duration) for st in tweens)
-        for k in range(1, samples + 1):
+        fracs = tween_fractions()
+        for k, frac in enumerate(fracs, 1):
             v = dict(old)
             for st in tweens:  # each over its own duration, like the probe
                 if st.param in v and st.value is not None:
-                    a = min(1.0, k / samples * total / max(float(st.duration), 1e-9))
+                    a = min(1.0, frac * total / max(float(st.duration), 1e-9))
                     v[st.param] = old[st.param] + (float(st.value) - old[st.param]) * a
-            out.append((v, set(during) | (set(after) if k == samples else set())))
+            out.append((v, set(during) | (set(after) if k == len(fracs) else set())))
             vals = v
     return out
 
@@ -634,13 +635,41 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     return out
 
 
+def _first_writes(scene: Scene) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for st in scene.steps:
+        if st.kind == "write":
+            for t in st.targets:
+                out.setdefault(t, st.index)
+    return out
+
+
+def _covered_by_fill(scene: Scene, geo: Geometry, a: Obj, b: Obj) -> tuple[str, str] | None:
+    """A fill drawn after (or with) a label is painted over it: Manim stacks in
+    the order objects are added."""
+    fill, txt = (a, b) if a.kind in ("area", "riemann") else (b, a)
+    if txt.kind not in TEXTLIKE or not geo.measured:
+        return None
+    order = _first_writes(scene)
+    if order.get(fill.id, 0) < order.get(txt.id, 0):
+        return None  # the label is on top
+    fb, tb = geo.bbox(fill.id), geo.bbox(txt.id)
+    if not fb or not tb:
+        return None
+    ov = fb.overlap_area(tb) / tb.area
+    if ov >= 0.25:
+        return ("warning", f"'{txt.id}' is painted over by the fill '{fill.id}' (written after it, "
+                           f"covering ~{ov * 100:.0f}% of it; measured)")
+    return None
+
+
 def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
                   initial: bool = True) -> tuple[str, str] | None:
     """(severity, summary) if the two shown shapes genuinely collide, else None.
     ``initial``: whether they are on screen together at the declared parameter
     values (geometry here is measured there; tween states are checked separately)."""
     if a.kind in ("area", "riemann") or b.kind in ("area", "riemann"):
-        return None  # fills sit on their plot by design
+        return _covered_by_fill(scene, geo, a, b)  # fills sit on their plot by design
     static_only = not initial and (is_dynamic(a, scene) or is_dynamic(b, scene))
     # never together where the moving one started: only what does not move (a
     # plot's axes and labels) is checked here; the moving parts per tween state
@@ -883,6 +912,33 @@ def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
     return out
 
 
+def tick_decimals(step: float) -> int:
+    """Decimals a tick step needs (1 -> 0, 0.25 -> 2)."""
+    for d in range(4):
+        if abs(step * 10 ** d - round(step * 10 ** d)) < 1e-9:
+            return d
+    return 3
+
+
+def _crowded_ticks(obj: Obj) -> str | None:
+    """'x-axis'/'y-axis' when adjacent tick numbers would overlap (24pt numbers are
+    ~0.3 units tall and ~0.16 units per character wide, before scaling)."""
+    p = obj.payload
+    for name, rng, length, along in (("x-axis", p.get("x_range", [-5, 5, 1]), p.get("width", 8.0), "w"),
+                                     ("y-axis", p.get("y_range", [-3, 3, 1]), p.get("height", 5.0), "h")):
+        lo, hi = float(rng[0]), float(rng[1])
+        step = float(rng[2]) if len(rng) > 2 else 1.0
+        if step <= 0 or hi <= lo:
+            continue
+        gap = float(length) * obj.scale * step / (hi - lo)
+        d = tick_decimals(step)
+        chars = max(len(f"{v:.{d}f}") for v in (lo, hi))
+        need = (0.3 if along == "h" else 0.16 * chars + 0.08) * obj.scale
+        if gap < need:
+            return name
+    return None
+
+
 def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEME) -> list[dict[str, Any]]:
     out = []
     zoom = zoom_while_visible(scene)  # a zoomed-out camera shrinks everything on screen
@@ -926,6 +982,13 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                                 f"axis labels of '{obj.id}' render at ~{fs:.0f}pt (below "
                                 f"{MIN_FONT_SIZE:.0f}pt)", "increase the plot's scale", target=obj.id))
         if obj.kind == "plot" and obj.payload.get("show_numbers"):
+            crowded = _crowded_ticks(obj)
+            if crowded:
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"tick numbers of '{obj.id}' overlap on its {crowded} (too many "
+                                "ticks for the axis length)", "use a larger tick step "
+                                "(x_range/y_range [min, max, step]), a longer axis, or drop "
+                                "show_numbers", target=obj.id))
             fs = TICK_FONT_SIZE * obj.scale * z
             if fs < MIN_FONT_SIZE:
                 out.append(_obl(scene.id, "legibility", "warning",

@@ -1101,3 +1101,82 @@ def test_label_written_during_zoom_is_framed_in_that_view(scene):
     srv.add_step("write", targets=[t])
     r = _measured(scene)
     assert any(o["lane"] == "framing" and o["severity"] == "error" for o in r["obligations"])
+
+
+# ---- twelfth audit --------------------------------------------------------------
+
+# L1. LaTeX special characters are refused with the fix, not a misleading error
+@pytest.mark.parametrize("tex", [r"r = 5% \text{ per year}", r"\text{50% off}", "a # b"])
+def test_tex_specials_refused(scene, tex):
+    r = srv.add_equation(tex)
+    assert r["ok"] is False and "\\" in r["error"] and "unescaped" in r["error"]
+    assert srv.add_equation(r"r = 5\% \text{ per year}")["ok"]
+
+
+def test_undefined_macro_names_the_equation(scene):
+    pytest.importorskip("manim")
+    e = _id(srv.add_equation(r"\undefinedcmd x"))
+    srv.add_step("write", targets=[e])
+    r = srv.inspect_render()  # a compile failure: geometry is not measured
+    comp = [o for o in r["obligations"] if o["lane"] == "compile"]
+    assert comp and e in comp[0]["summary"] and "Undefined control sequence" in comp[0]["summary"]
+
+
+# L2. periodic motion does not alias with the tween samples
+def test_periodic_dot_leaving_frame_is_caught(scene):
+    import math
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["3*sin(4*x)"], x_range=[-4, 4], y_range=[-3, 3],
+                         width=8, height=6, x=-2))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="3.5", at_y="5*sin(t)"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=8 * math.pi, duration=4)
+    r = _measured(scene)
+    assert any(o["lane"] == "framing" and o.get("target") == d for o in r["obligations"]
+               if o["severity"] == "error")
+
+
+# L3. a label struck through by an axis line between ticks
+def test_label_on_axis_line(scene):
+    p = _id(srv.add_plot(functions=["0.5*x+2"], x_range=[-6, 6, 3], y_range=[-1, 5, 1],
+                         width=12, height=5, y=-0.5))
+    a = _id(srv.add_text("a", x=-2.2, y=-2.1667))
+    srv.add_step("write", targets=[p, a])
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" and a in (o.get("target"), o.get("other"))
+               for o in r["obligations"])
+
+
+# L5. a fill written after a label paints over it
+def test_fill_over_label(scene):
+    p = _id(srv.add_plot(functions=["4 - x**2/4"], x_range=[0, 4], y_range=[0, 5]))
+    lab = _id(srv.add_equation(r"\int_0^4 f\,dx \approx 10.7", x=-1.2, y=-0.5, scale=0.8))
+    rr = _id(srv.add_riemann(p, 0, 4, 0.25))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[lab])
+    srv.add_step("write", targets=[rr])
+    r = _measured(scene)
+    assert any("painted over" in o["summary"] for o in r["obligations"])
+
+
+# L6. tick numbers crowded on a short axis
+def test_crowded_tick_numbers(scene):
+    p = _id(srv.add_plot(x_range=[0, 16, 1], y_range=[-1, 1], width=12, height=0.4,
+                         show_numbers=True))
+    srv.add_step("write", targets=[p])
+    assert any("overlap on its y-axis" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# L7. tick numbers: no thousands separators, integral steps stay integers
+def test_tick_number_format(scene):
+    p = _id(srv.add_plot(functions=["x"], x_range=[2000, 2030, 5], y_range=[0, 5],
+                         show_numbers=True))
+    assert srv.inspect_project()["result"]["scenes"][0]["objects"][0]["payload"]["y_range"][2] == 1
+    code = generate_module(scene, "chalkboard")
+    assert "'group_with_commas': False" in code and "'num_decimal_places': 0" in code
+
+
+# L8. close_project says what it discards
+def test_close_project_reports_discarded(scene):
+    r = srv.close_project()
+    assert r["result"]["discarded"]["scenes"] == 1 and "files_kept" in r["result"]

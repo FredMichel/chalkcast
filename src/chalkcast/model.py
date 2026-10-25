@@ -112,6 +112,17 @@ STEP_KINDS = ("write", "transform", "highlight", "fade", "camera_move", "wait", 
 INTRODUCING = {"write"}
 
 
+TWEEN_SAMPLES = 16
+
+
+def tween_fractions(n: int = TWEEN_SAMPLES) -> list[float]:
+    """Time fractions at which a tween beat is measured, ending at 1 (where it lands).
+    Spread over the beat but off a regular grid: a periodic motion would alias with
+    one (sin(t) over 8 pi sampled at k/8 is 0 every time)."""
+    out = [(k + 0.5 + 0.8 * (((k + 1) * 0.6180339887) % 1 - 0.5)) / n for k in range(n - 1)]
+    return sorted(out) + [1.0]
+
+
 @dataclass
 class Step:
     index: int

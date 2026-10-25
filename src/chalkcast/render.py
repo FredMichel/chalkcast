@@ -18,7 +18,7 @@ from typing import Any
 from .codegen import generate_module, plot_is_dynamic, uses_params
 from .model import Project, Scene
 
-TWEEN_SAMPLES = 8
+from .model import TWEEN_SAMPLES, tween_fractions  # noqa: E402
 
 QUALITY_FLAGS = {
     "low": "-ql",     # 480p
@@ -97,12 +97,12 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
         # sampled in time over the beat: each tween runs linearly over its own
         # duration (a shorter one has landed while a longer one still moves)
         start, total = dict(cur), max(dur.values())
-        for k in range(1, TWEEN_SAMPLES + 1):
-            a = k / TWEEN_SAMPLES
+        fracs = tween_fractions()
+        for k, a in enumerate(fracs, 1):
             vals = {**start, **{p: start[p] + min(1.0, a * total / max(dur[p], 1e-9)) * (v - start[p])
                                 for p, v in beat.items()}}
             states.append({"step": beat_step, "params": vals, "frac": a,
-                           "beat_end": k == TWEEN_SAMPLES})
+                           "beat_end": k == len(fracs)})
         cur.update(beat)
         beat.clear()
         dur.clear()
@@ -214,12 +214,17 @@ def _sample_frames(video: Path, workdir: Path, duration: float, n: int = 4) -> l
         old.unlink()
     frames = []
     for i in range(n):
-        # the last one just before the end (a seek past the final frame yields nothing)
-        t = max(0.0, min(duration * (i + 1) / n, duration - 0.2))
         out = out_dir / f"{video.stem}_{i + 1:03d}.png"
-        proc = subprocess.run([ffmpeg_exe(), "-y", "-ss", f"{t:.3f}", "-i", str(video),
-                               "-frames:v", "1", "-vf", "scale=640:-1", str(out)],
-                              capture_output=True, text=True)
+        if i == n - 1:
+            # the true final frame: decode the last half second, keep overwriting
+            # one image (a seek near the end can land before the last animation ends)
+            cmd = [ffmpeg_exe(), "-y", "-sseof", "-0.5", "-i", str(video), "-update", "1",
+                   "-vf", "scale=640:-1", str(out)]
+        else:
+            t = max(0.0, duration * (i + 1) / n)
+            cmd = [ffmpeg_exe(), "-y", "-ss", f"{t:.3f}", "-i", str(video),
+                   "-frames:v", "1", "-vf", "scale=640:-1", str(out)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode == 0 and out.exists():
             frames.append(str(out))
     return frames

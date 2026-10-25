@@ -226,7 +226,17 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
     spec_mod = importlib.util.spec_from_file_location("_cc_scene", module_path)
     mod = importlib.util.module_from_spec(spec_mod)
     spec_mod.loader.exec_module(mod)  # type: ignore[union-attr]
-    ns = mod._cc_build()
+    try:
+        ns = mod._cc_build()
+    except Exception as exc:
+        # Manim's own messages for a LaTeX failure are misleading ("installation does
+        # not support converting .dvi files", an IndexError, a log path): name the
+        # equation and the first LaTeX error instead, when the strict check finds it
+        errors = _latex_errors(spec)
+        if errors:
+            return {"ok": False, "error": "LaTeX error: " + "; ".join(errors),
+                    "traceback": "\n".join(errors)}
+        raise exc
     P = ns.get("P", {})
 
     objects: dict[str, Any] = {}
@@ -252,7 +262,9 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
             # axis labels are ink a note must not sit on, like the axes themselves
             labels = ns.get(f"{oid}_labels")
             plots[oid] = {"axes_bbox": _bbox(ax), "curves": curves,
-                          "axes_points": _path_samples(ax) + (_path_samples(labels) if labels else [])}
+                          # an axis line is one cubic segment: sample it every few hundredths
+                          "axes_points": _path_samples(ax, per_leaf=400) +
+                          (_path_samples(labels) if labels else [])}
         elif kind == "shape":
             ink[oid] = _ink(m, kind)
 
