@@ -291,11 +291,13 @@ def param_moments(scene: Scene, samples: int = 8) -> list[tuple[dict[str, float]
             continue
         during, after = windows[tweens[0].index]
         old = dict(vals)
+        total = max(float(st.duration) for st in tweens)
         for k in range(1, samples + 1):
             v = dict(old)
-            for st in tweens:
+            for st in tweens:  # each over its own duration, like the probe
                 if st.param in v and st.value is not None:
-                    v[st.param] = old[st.param] + (float(st.value) - old[st.param]) * k / samples
+                    a = min(1.0, k / samples * total / max(float(st.duration), 1e-9))
+                    v[st.param] = old[st.param] + (float(st.value) - old[st.param]) * a
             out.append((v, set(during) | (set(after) if k == samples else set())))
             vals = v
     return out
@@ -433,6 +435,14 @@ def visible_views(scene: Scene) -> dict[str, list[tuple[int, BBox]]]:
     return out
 
 
+def smooth(t: float, inflection: float = 10.0) -> float:
+    """Manim's default rate function (camera moves use it; tweens are linear)."""
+    import math
+    sig = lambda v: 1 / (1 + math.exp(-v))  # noqa: E731
+    err = sig(-inflection / 2)
+    return min(max((sig(inflection * (t - 0.5)) - err) / (1 - 2 * err), 0.0), 1.0)
+
+
 def _lerp_view(a: BBox, b: BBox, f: float) -> BBox:
     return BBox(cx=a.cx + (b.cx - a.cx) * f, cy=a.cy + (b.cy - a.cy) * f,
                 width=a.width + (b.width - a.width) * f, height=a.height + (b.height - a.height) * f)
@@ -468,7 +478,8 @@ def _framing_entries(scene: Scene, geo: "Geometry", oid: str,
             if cam:
                 tween_t = max(by_index[i].duration for i in during if by_index[i].kind == "tween")
                 c = cam[-1]
-                f = min(1.0, float(st.get("frac", 1.0)) * tween_t / max(c.duration, 1e-9))
+                # frac is the time fraction of the beat; the camera eases over its own run_time
+                f = smooth(min(1.0, float(st.get("frac", 1.0)) * tween_t / max(c.duration, 1e-9)))
                 views.append(_lerp_view(cams[during[0]][0], cams[c.index][1], f))
             else:
                 views += [end_view[i] for i in during if i in steps]
@@ -624,6 +635,11 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     states = timeline(scene) if scene.steps else [{o.id: o.id for o in scene.objects}]
     init = initial_window(scene) if scene.steps else {1}
     together: dict[tuple[str, str], bool] = {}  # pair -> together at the declared values?
+    shown_as: dict[str, set[str]] = {}  # transform destination -> the object showing it
+    for st in states:
+        for oid, g in st.items():
+            if oid != g:
+                shown_as.setdefault(g, set()).add(oid)
     for n, st in enumerate(states, 1):
         geoms = list(dict.fromkeys(st.values()))
         for i in range(len(geoms)):
@@ -638,6 +654,9 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         found = _pair_finding(scene, geo, a, b, initial)
         if found:
             sev, summary = found
+            for g in key:
+                if g in shown_as:
+                    summary += f" ('{g}' is on screen as {', '.join(repr(s) for s in sorted(shown_as[g]))})"
             out.append(_obl(scene.id, "collision", sev, summary,
                             "move one of them, or stagger their steps so they are not "
                             "visible together", target=key[1], other=key[0]))
@@ -646,6 +665,7 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     # everything shown until the next tween moves them again
     tl = timeline(scene) if scene.steps else []
     windows = _beat_windows(scene)
+    crossed: set[tuple[str, str]] = set()
     for st in geo.states:
         start = int(st.get("step", 0))
         if start not in windows:
@@ -659,11 +679,11 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                     shown.update(tl[i - 1])
             for tid in dict.fromkeys(shown.values()):  # the shape each label shows
                 tobj = scene.get_obj(tid)
-                if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in seen:
+                if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in crossed:
                     continue
                 tbox = geo.bbox(tid)
                 if tbox and any(_inside(p, tbox) for p in pts):
-                    seen.add((tid, mover))
+                    crossed.add((tid, mover))
                     out.append(_obl(scene.id, "collision", "warning",
                                     f"'{tid}' is crossed by '{mover}' during or after the tween "
                                     f"of step {start} (measured)",
@@ -771,6 +791,7 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
         return out
     introduced: set[str] = set()
     on_screen: set[str] = set()
+    shown_by: dict[str, str] = {}  # transform destination -> the object that took its shape
     for step in scene.steps:
         # Every referenced target must be a defined object, or codegen emits an
         # undefined variable and the render crashes with a NameError.
@@ -781,6 +802,12 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
                                 "use an object id returned by an add_* call", step=step.index))
         if step.kind == "write":
             for tid in step.targets:
+                if shown_by.get(tid) in on_screen:
+                    out.append(_obl(scene.id, "timing", "warning",
+                                    f"step {step.index} writes '{tid}', which is already on screen "
+                                    f"as '{shown_by[tid]}' (transformed into it): a duplicate is drawn",
+                                    f"drop the step, or fade '{shown_by[tid]}' first",
+                                    step=step.index, target=tid))
                 if tid in on_screen:
                     out.append(_obl(scene.id, "timing", "warning",
                                     f"step {step.index} writes '{tid}', which is already on screen "
@@ -805,7 +832,12 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
         # transform/highlight/fade must target an object already on screen.
         if step.kind in ("highlight", "fade", "transform"):
             for tid in step.targets:
-                if tid in defined and tid not in introduced:
+                if tid in defined and tid not in on_screen and shown_by.get(tid) in on_screen:
+                    out.append(_obl(scene.id, "timing", "error",
+                                    f"step {step.index} ({step.kind}) targets '{tid}', which is on "
+                                    f"screen only as '{shown_by[tid]}' (transformed into it)",
+                                    f"target '{shown_by[tid]}' instead", step=step.index))
+                elif tid in defined and tid not in introduced:
                     out.append(_obl(scene.id, "timing", "error",
                                     f"step {step.index} ({step.kind}) targets '{tid}' before it is introduced",
                                     f"add a 'write' step for '{tid}' first", step=step.index))
@@ -822,6 +854,8 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
                                 step=step.index))
             if step.kind == "fade":
                 on_screen.difference_update(step.targets)
+            if step.kind == "transform" and step.targets and step.targets[0] in on_screen and step.to:
+                shown_by[step.to] = step.targets[0]
             if step.kind == "transform" and step.to and step.to not in defined:
                 out.append(_obl(scene.id, "timing", "error",
                                 f"step {step.index} transforms into undefined object '{step.to}'",
@@ -833,6 +867,21 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
                         f"step {idx} tweens '{scene.steps[idx - 1].param}', which no object uses: "
                         "nothing moves", "use the parameter in an expression or anchor, or drop "
                         "the step", step=idx))
+    # Areas, Riemann sums and anchored shapes are drawn from their plot's axes but
+    # are separate objects: fading (or never writing) the plot leaves them floating.
+    floating: set[str] = set()
+    for st in timeline(scene):
+        on = set(st) | set(st.values())
+        for oid in st:
+            o = scene.get_obj(st[oid])
+            parent = (o.payload.get("plot") or (o.payload.get("anchor") or {}).get("plot")) if o else None
+            if parent and parent not in on and oid not in floating:
+                floating.add(oid)
+                out.append(_obl(scene.id, "timing", "warning",
+                                f"'{oid}' is on screen without its plot '{parent}' (faded or not "
+                                "written yet): it floats without axes",
+                                f"fade '{oid}' together with '{parent}', or write '{parent}' first",
+                                target=oid))
     # Objects that are defined but never appear are almost always a forgotten step.
     if scene.steps:
         used = set()

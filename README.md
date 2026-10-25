@@ -110,7 +110,7 @@ chalkcast demo                 # builds + verifies + renders the demo scene
   are rejected with a message saying what to do. Edits are all-or-nothing. Side
   effects (cascade removals, regrouped steps, redeclared parameters, default
   ranges) are reported in the result. `export_gif` refuses a render that predates
-  the latest edit. Eight independent audits (22, then 17, 14, 8, 4, 9, 4 and 7 findings) are
+  the latest edit. Nine independent audits (22, then 17, 14, 8, 4, 9, 4, 7 and 5 findings) are
   pinned one test per finding in `tests/test_ergonomics.py`.
 - **Faithful plots:** dense sampling, curves split at jumps and poles (no invented
   risers or overshoot), clipping to the axes. A *fidelity* lane measures the drawn

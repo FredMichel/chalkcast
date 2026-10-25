@@ -90,17 +90,22 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
     states: list[dict[str, Any]] = []
     cur = dict(scene.params)
     beat: dict[str, float] = {}
+    dur: dict[str, float] = {}
     beat_step = 0
 
     def flush() -> None:
-        start = dict(cur)
+        # sampled in time over the beat: each tween runs linearly over its own
+        # duration (a shorter one has landed while a longer one still moves)
+        start, total = dict(cur), max(dur.values())
         for k in range(1, TWEEN_SAMPLES + 1):
             a = k / TWEEN_SAMPLES
-            vals = {**start, **{p: start[p] + a * (v - start[p]) for p, v in beat.items()}}
+            vals = {**start, **{p: start[p] + min(1.0, a * total / max(dur[p], 1e-9)) * (v - start[p])
+                                for p, v in beat.items()}}
             states.append({"step": beat_step, "params": vals, "frac": a,
                            "beat_end": k == TWEEN_SAMPLES})
         cur.update(beat)
         beat.clear()
+        dur.clear()
 
     for st in scene.steps:
         if beat and not st.with_previous:
@@ -109,6 +114,7 @@ def probe_spec(scene: Scene) -> dict[str, Any]:
             if not beat:
                 beat_step = st.index
             beat[st.param] = float(st.value)
+            dur[st.param] = float(st.duration)
     if beat:
         flush()
     return {"objects": objs, "param_states": states}

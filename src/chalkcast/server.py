@@ -155,11 +155,12 @@ def _interval_error(plot: Obj, x_min: float, x_max: float) -> str | None:
 
 def _overlay_error(scene: Scene, plot: Obj, fn_index: int, x_min: float, x_max: float,
                    kind: str) -> str | None:
-    """Refuse what can never show the integral. A parameter-driven curve depends on
-    the timeline (redeclarations, tweens), so its values are checked by verification
-    at the parameter values the overlay is actually shown at, not here."""
+    """At the parameters' current values -- unless the curve follows a tweened
+    parameter: then it is shown at other values, which verification checks at
+    the moments the overlay is on screen."""
+    tweened = {st.param for st in scene.steps if st.kind == "tween"}
     return overlay_error(scene, plot, fn_index, x_min, x_max, kind, scene.params,
-                         axis_only=bool(obj_params(plot, scene)))
+                         axis_only=bool(obj_params(plot, scene) & tweened))
 
 
 def _anchor_error(expr: str, axis: str) -> str | None:

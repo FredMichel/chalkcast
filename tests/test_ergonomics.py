@@ -871,3 +871,73 @@ def test_anchor_leaving_axes(scene):
     srv.add_step("write", targets=[p, d])
     srv.add_step("tween", param="t", value=2.8)
     assert any("leaves the axes" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# ---- ninth audit ----------------------------------------------------------------
+
+# H1. moving curves/dots are checked against equation labels too
+def test_moving_dot_crosses_equation(scene):
+    srv.add_parameter("a", -4)
+    eq = _id(srv.add_equation("v(t)", x=1.6, y=0.833))
+    p = _id(srv.add_plot(functions=["0*x"]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="a", at_y="1", size=2))
+    srv.add_step("write", targets=[eq, p, d])
+    srv.add_step("tween", param="a", value=4, duration=2)
+    r = _measured(scene)
+    assert any(o["lane"] == "collision" and o["target"] == eq for o in r["obligations"])
+
+
+# H2. a transform destination is reached through the object that shows it
+def test_transform_destination_targets_point_to_source(scene):
+    a, b = _id(srv.add_text("x^2-1")), _id(srv.add_text("(x-1)(x+1)"))
+    srv.add_step("write", targets=[a])
+    srv.add_step("transform", targets=[a], to=b)
+    srv.add_step("fade", targets=[b])
+    errs = [o["suggested_fix"] for o in _lanes(scene) if o["lane"] == "timing"]
+    assert any(f"target '{a}'" in f for f in errs)
+
+
+def test_writing_a_shown_destination_warns(scene):
+    a, b = _id(srv.add_text("x^2-1")), _id(srv.add_text("(x-1)(x+1)"))
+    srv.add_step("write", targets=[a])
+    srv.add_step("transform", targets=[a], to=b)
+    srv.add_step("write", targets=[b])
+    assert any("duplicate" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# H3. overlays and anchored shapes left without their plot
+def test_overlay_without_its_plot(scene):
+    p = _id(srv.add_plot(functions=["x**2/4"], x_range=[-3, 3], y_range=[0, 3]))
+    ar = _id(srv.add_area(p, 0, 2))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="2", at_y="1"))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[ar, d])
+    srv.add_step("fade", targets=[p])
+    floating = {o["target"] for o in _lanes(scene, "warning") if "without its plot" in o["summary"]}
+    assert floating == {ar, d}
+
+
+# H4. camera moves are eased like Manim's (smooth), tweens linear
+def test_camera_easing_matches_manim():
+    from chalkcast.verify import smooth
+    assert smooth(0) == 0 and smooth(1) == 1 and abs(smooth(0.5) - 0.5) < 1e-9
+    assert smooth(0.25) < 0.2  # eased: well behind a linear move early on
+
+
+def test_long_tracking_pan_is_flagged(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["0*x"]))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="t", at_y="0", size=2))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("tween", param="t", value=60, duration=4)
+    srv.add_step("camera_move", zoom=1, focus_x=48, focus_y=0, duration=4, with_previous=True)
+    r = _measured(scene)
+    assert any(o["lane"] == "framing" and o.get("target") == d for o in r["obligations"]
+               if o["severity"] == "error")
+
+
+# H5. a curve following an un-tweened parameter is still refused at add time
+def test_area_refused_for_untweened_parameter(scene):
+    srv.add_parameter("a", 5)
+    p = _id(srv.add_plot(functions=["a*x**2"], y_range=[0, 4]))
+    assert srv.add_area(p, 0, 2)["ok"] is False
