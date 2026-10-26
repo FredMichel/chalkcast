@@ -1076,7 +1076,7 @@ def test_fill_contrast(scene):
     rr = _id(srv.add_riemann(p, 0, 2, dx=0.5, color="WHITE"))
     srv.add_step("write", targets=[p, rr])
     obls = inspect_scene(scene, theme_name="whiteboard")["obligations"]
-    assert any(o["target"] == rr and ("barely shows" in o["summary"] or "erases" in o["summary"])
+    assert any(o["target"] == rr and ("barely shows" in o["summary"] or "does not show" in o["summary"])
                for o in obls)
 
 
@@ -1535,8 +1535,9 @@ def test_plot_color_with_coloured_curves(scene):
     assert r["ok"] and any("all drawn in RED" in n for n in r["limitations"])
 
 
-# R8. an opaque fill in the background colour erases what is under it
-def test_background_fill_is_an_error():
+# R8. an opaque fill in the background colour does not show (it lies under the
+# curves since fills got z_index -1, so it erases nothing: a warning, not an error)
+def test_background_fill_is_a_warning():
     srv.open_project(theme="whiteboard")
     srv.add_scene("t")
     sc = session.get_project().get_scene(None)
@@ -1544,8 +1545,9 @@ def test_background_fill_is_an_error():
     a = _id(srv.add_area(plot_id=p, x_min=0, x_max=2))
     srv.update_object(a, color="#f7f7f4", opacity=0.9)
     srv.add_step("write", targets=[p, a])
-    assert any("erases" in o["summary"] for o in inspect_scene(sc, theme_name="whiteboard")["obligations"]
-               if o["severity"] == "error")
+    obls = inspect_scene(sc, theme_name="whiteboard")["obligations"]
+    assert any("does not show" in o["summary"] and o["severity"] == "warning" for o in obls)
+    assert not any(o["severity"] == "error" for o in obls)
 
 
 # R9. side-by-side labels with no space between them
@@ -2293,3 +2295,47 @@ def test_no_restacking_lines(scene):
     lines = [ln.strip() for ln in generate_module(scene, "chalkboard").splitlines()]
     assert not any(ln.startswith("self.add(") for ln in lines)
     assert any(ln.startswith(f"{a} = ") and ln.endswith(".set_z_index(-1)") for ln in lines)
+
+
+# ---- twenty-eighth audit ---------------------------------------------------------
+
+# AC1. a transform takes the destination's layer: into a fill goes under, out of one on top
+def test_transform_takes_destination_layer(scene):
+    pytest.importorskip("manim")
+    p = _id(srv.add_plot(functions=[{"expr": "x**2/3+0.5", "color": "YELLOW"}], x_range=[0, 3, 1],
+                         y_range=[0, 4, 1], width=6, height=4))
+    t = _id(srv.add_text("Area?", x=-1, y=-1))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=2.5, color="GREEN", opacity=0.8))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[t])
+    srv.add_step("transform", targets=[t], to=a)
+    assert any(f"Transform({t}.set_z_index({a}.z_index), {a}" in ln
+               for ln in generate_module(scene, "chalkboard").splitlines())
+    import numpy as np
+    from PIL import Image
+    png = srv.render_frame()["evidence"]["frames"][0]
+    img = np.asarray(Image.open(png).convert("RGB")).astype(int)
+    h, w, _ = img.shape
+    ppu = w / (8 * 16 / 9)
+    m = plot_to_scene(scene.get_obj(p))
+    x, y = m["origin"][0] + m["x_unit"] * 1.5, m["origin"][1] + m["y_unit"] * (1.5 ** 2 / 3 + 0.5)
+    r, g, b = img[int(round(h / 2 - y * ppu)), int(round(w / 2 + x * ppu))]
+    assert r > 180 and g > 180 and b < 140  # the curve is still yellow over the fill
+
+
+# AC2. text partly off a fill (or left behind when it fades) is still checked on the background
+@pytest.mark.parametrize("fade", [False, True])
+def test_text_partly_off_fill_checked_on_background(scene, fade):
+    p = _id(srv.add_plot(functions=[{"expr": "2", "color": "YELLOW"}], x_range=[0, 4], y_range=[0, 4],
+                         width=6, height=4))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=2 if not fade else 4, color="YELLOW", opacity=0.9))
+    t = _id(srv.add_text("Energy stored here", x=0.2 if not fade else 0, y=-1.0, font_size=30,
+                         color="#202020"))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[t])
+    if fade:
+        srv.add_step("fade", targets=[a])
+        srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == t and "nearly invisible" in o["summary"] for o in r["obligations"])

@@ -1232,7 +1232,8 @@ def _shown_span(scene: Scene, oid: str) -> tuple[float, float]:
 def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
                   ink: str) -> tuple[list[dict[str, Any]], set[str]]:
     """Text on a fill (which lies under it) is read against the fill's colour, not
-    the background. Returns the findings and the ids of texts that sit on a fill."""
+    the background. Returns the findings and the ids of texts that sit wholly on a
+    fill for as long as they are shown (only those skip the background check)."""
     out: list[dict[str, Any]] = []
     on_fill: set[str] = set()
     if not geo.measured:
@@ -1250,9 +1251,11 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
             tb = geo.bbox(t.id)
             if max(f0, t0) >= min(f1, t1) or tb is None:
                 continue  # never on screen together
-            if (geo.fill_cover(f.id, tb) or 0) < 0.25:
+            cover = geo.fill_cover(f.id, tb) or 0
+            if cover < 0.25:
                 continue
-            on_fill.add(t.id)
+            if cover >= 0.9 and f0 <= t0 and t1 <= f1:
+                on_fill.add(t.id)  # all of it, all the time: the background never shows behind it
             col = t.color or ink
             c = contrast(col, under)
             if c is not None and c < MIN_TEXT_CONTRAST:
@@ -1296,9 +1299,10 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
             op = float(obj.payload.get("opacity", 0.5)) if obj.kind == "area" else 0.6
             c = contrast(_blend(obj.color, bg, op), bg)
             if c is not None and c < MIN_FILL_CONTRAST and op >= 0.5:
-                out.append(_obl(scene.id, "legibility", "error",
+                # it lies under the curves and axes: it erases nothing, it just does not show
+                out.append(_obl(scene.id, "legibility", "warning",
                                 f"fill of '{obj.id}' ({obj.color} at opacity {op}) is the background "
-                                f"colour: it erases the curves and axes under it (contrast {c:.2f}:1)",
+                                f"colour: it does not show (contrast {c:.2f}:1)",
                                 "pick a color that contrasts with the theme, or reset it with update_object(color=\"default\")",
                                 target=obj.id))
             elif c is not None and c < MIN_FILL_CONTRAST:

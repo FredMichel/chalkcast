@@ -417,7 +417,15 @@ def _step_anims(scene: Scene, step: Step, accent: str = "#ff7eb6") -> list[str]:
         return out
     if step.kind == "transform":
         if step.targets and step.to:
-            return [f"Transform({step.targets[0]}, {step.to}, run_time={dur})"]
+            # Transform keeps the source mobject: it takes the destination's layer
+            # (a text morphing into a fill goes under the curves, a fill into text
+            # comes out on top)
+            src = step.targets[0]
+            fills = [(o := scene.get_obj(i)) is not None and o.kind in ("area", "riemann")
+                     for i in (src, step.to)]
+            if fills[0] != fills[1]:
+                src = f"{src}.set_z_index({step.to}.z_index)"
+            return [f"Transform({src}, {step.to}, run_time={dur})"]
         return []
     if step.kind == "highlight":
         return [f"Indicate({t}, color={accent!r}, run_time={dur})" for t in step.targets]
