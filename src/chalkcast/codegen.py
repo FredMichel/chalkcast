@@ -315,7 +315,10 @@ def _define_shape(obj: Obj, ink: str, scene: Scene) -> list[str]:
     body += _scale(obj)
     anchor = p.get("anchor")
     if not anchor:
-        return [f"{var} = {body}{_pos(obj)}"]
+        lines = [f"{var} = {body}{_pos(obj)}"]
+        if shape == "triangle":  # its circumcentre at (x, y), not its bounding box centre
+            lines.append(f"{var}.shift({var}.get_center() - {var}.get_center_of_mass())")
+        return lines
     # Anchored in a plot's coordinates; follows scene parameters if it uses them.
     plot = anchor["plot"]
     xe, ye = str(anchor.get("x", "0")), str(anchor.get("y", "0"))

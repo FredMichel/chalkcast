@@ -470,7 +470,8 @@ def add_shape(shape: str = "circle", size: float | None = None, x: float | None 
               scene_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
     """Add primitive geometry: circle|square|rectangle|triangle|arrow|dot|line, centred
     at (x, y) (default 0, 0). size (default 1): circle = diameter, square = side,
-    triangle = circumradius, dot = 10 x radius (minimum radius 0.05), line/arrow =
+    triangle = circumradius (equilateral, apex up, circumcentre at (x, y); the result
+    lists its vertices), dot = 10 x radius (minimum radius 0.05), line/arrow =
     length (horizontal).
     rectangle: width x height (default 1 x 0.5) instead of size.
     line/arrow: give x1,y1,x2,y2 for an explicit segment (any direction) instead of
@@ -532,7 +533,13 @@ def add_shape(shape: str = "circle", size: float | None = None, x: float | None 
     oid = scene.new_obj_id("shape")
     scene.objects.append(Obj(id=oid, kind="shape", position=(x or 0.0, y or 0.0), color=color,
                              payload=payload))
-    return ok({"scene_id": scene.id, "object_id": oid})
+    extra: dict[str, Any] = {}
+    if shape == "triangle" and plot_id is None:
+        import math as _m
+        r, (cx, cy) = (size or 1.0), (x or 0.0, y or 0.0)
+        extra["vertices"] = [[round(cx + r * _m.cos(_m.radians(a)), 4),
+                              round(cy + r * _m.sin(_m.radians(a)), 4)] for a in (90, 210, 330)]
+    return ok({"scene_id": scene.id, "object_id": oid, **extra})
 
 
 @mcp.tool()

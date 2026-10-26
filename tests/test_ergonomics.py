@@ -1920,7 +1920,7 @@ def test_fix_does_not_push_plot_into_neighbour(scene):
 
 
 # X3. fill over tick numbers: judged by the contrast left, not opacity alone
-@pytest.mark.parametrize("color,op,warns", [("WHITE", 0.45, True), ("#1d4ed8", 0.3, False)])
+@pytest.mark.parametrize("color,op,warns", [("WHITE", 0.6, True), ("#1d4ed8", 0.3, False)])
 def test_fill_over_numbers_by_contrast(scene, color, op, warns):
     p = _id(srv.add_plot(functions=["-sin(x)"], x_range=[0, 7], y_range=[-1.5, 1.5], width=9, height=4,
                          show_numbers=True))
@@ -1949,3 +1949,59 @@ def test_label_touching_a_line(scene):
     r = _measured(scene)
     assert any("touches the outline" in o["summary"] or "crossed by" in o["summary"]
                for o in r["obligations"])
+
+
+# ---- twenty-fourth audit ----------------------------------------------------------
+
+# Y1. labels beside a diagonal line or off a point are judged by their glyphs and the disc
+def test_label_by_glyphs_beside_line_and_dot(scene):
+    ln = _id(srv.add_shape("line", x1=-3, y1=-2, x2=3, y2=2))
+    e = _id(srv.add_equation("x^{2}", x=-0.194, y=0.291))
+    d = _id(srv.add_shape("dot", size=4, x=3, y=-2))
+    a = _id(srv.add_equation("A", x=2.43, y=-2.58))
+    srv.add_step("write", targets=[ln, e, d, a])
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o["lane"] == "collision"]
+
+
+# Y2. a triangle's circumcentre is at (x, y) and its vertices are returned
+def test_triangle_circumcentre_and_vertices(scene):
+    r = srv.add_shape("triangle", size=2.5, x=0, y=-0.5)
+    t = _id(r)
+    assert r["result"]["vertices"][0] == pytest.approx([0, 2.0])
+    srv.add_step("write", targets=[t])
+    pytest.importorskip("manim")
+    from chalkcast import render
+    proj = session.get_project()
+    meas = render.probe_scene(proj, scene, session.workdir(proj.id, scene.id))
+    left, right, bottom, top = meas["objects"][t]["bbox"]
+    assert top == pytest.approx(2.0, abs=0.02) and bottom == pytest.approx(-1.75, abs=0.02)
+
+
+# Y3. a label stacked right under a tick number touches it (named)
+def test_label_stacked_under_tick_number(scene):
+    p = _id(srv.add_plot(x_range=[-1, 6, 1], y_range=[-1, 5, 1], width=7, height=5.5, x=-1.5, y=-0.5,
+                         show_numbers=True, x_label="x", y_label="y"))
+    e = _id(srv.add_equation("v_x=4", x=-2.0, y=-2.837))
+    srv.add_step("write", targets=[p, e])
+    r = _measured(scene)
+    assert any("tick number" in o["summary"] for o in r["obligations"] if o.get("target") == e)
+
+
+# Y4. the default fill does not trip the numbers rule; low-contrast text does
+def test_default_fill_and_text_contrast():
+    srv.open_project()
+    srv.add_scene("t")
+    sc = session.get_project().get_scene(None)
+    p = _id(srv.add_plot(functions=["-sin(x)"], x_range=[0, 7], y_range=[-1.5, 1.5], show_numbers=True))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=3.14))
+    srv.add_step("write", targets=[p, a])
+    r = _measured(sc)
+    assert not any(o.get("target") == a and "tick number" in o["summary"] for o in r["obligations"])
+    srv.open_project(theme="whiteboard")
+    srv.add_scene("t")
+    sc = session.get_project().get_scene(None)
+    t = _id(srv.add_text("go", color="GREEN"))
+    srv.add_step("write", targets=[t])
+    assert any("hard to read" in o["summary"]
+               for o in inspect_scene(sc, theme_name="whiteboard")["obligations"])

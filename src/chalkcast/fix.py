@@ -267,6 +267,14 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             if spot is None:
                 unresolved.append(o)
                 continue
+            # a point's label must stay by its point: far away it reads as another's
+            dots = [d.id for d in scene.objects if d.kind == "shape" and d.payload.get("shape") == "dot"
+                    and (db := geo.bbox(d.id)) and math.hypot(db.cx - box.cx, db.cy - box.cy) < 0.8]
+            if dots and math.hypot(*spot) > 0.5:
+                unresolved.append({**o, "summary": o["summary"] + f": the nearest free spot is "
+                                   f"{math.hypot(*spot):.2f} units away, too far from its point "
+                                   f"{dots}; place it yourself (e.g. on the other side of the point)"})
+                continue
             x, y = tobj.position
             tobj.position = (round(x + spot[0], 3), round(y + spot[1], 3))
             touched.add(target)

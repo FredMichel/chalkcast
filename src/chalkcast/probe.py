@@ -194,7 +194,10 @@ def _ink(m: Any, kind: str) -> list[list[float]]:
         if box is None:  # no finite point (anchor undefined): nothing drawn
             return []
         l, r, b, t = box
-        return [[float(x), float(y)] for x in np.linspace(l, r, 5) for y in np.linspace(b, t, 5)]
+        cx, cy, rx, ry = (l + r) / 2, (b + t) / 2, (r - l) / 2 or 1e-9, (t - b) / 2 or 1e-9
+        # the disc, not its bounding square (a label off a point sits by its corner)
+        return [[float(x), float(y)] for x in np.linspace(l, r, 7) for y in np.linspace(b, t, 7)
+                if ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1.0001]
     # along the path, not just its control points: a straight arrow or a rectangle
     # side has only its endpoints and two handles, which miss a label in the middle
     return _path_samples(m, per_leaf=160)

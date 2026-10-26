@@ -38,6 +38,7 @@ TICK_FONT_SIZE = 24           # axis numbers (codegen's include_numbers font siz
 MATHTEX_FONT_SIZE = 48        # Manim's MathTex default; scale multiplies it
 MARGIN_TOLERANCE = 0.1        # measured intrusion into the safe margin worth noting (info)
 MIN_CONTRAST = 1.6            # WCAG contrast ratio below which a color all but vanishes
+MIN_TEXT_CONTRAST = 2.5       # text needs more than a stroke to be read (GREEN on white: 1.9)
 TEXTLIKE = ("text", "equation")
 
 GEOMETRIC_LANES = ["framing", "collision", "legibility", "timing", "fidelity", "range"]
@@ -852,21 +853,25 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
                     return ("error", f"'{txt.id}' is printed over the {which} of '{other.id}' "
                                      f"({w:.2f} x {h:.2f} units, measured)")
             for which, lb in marks:
-                w = min(tbox.right, lb.right) - max(tbox.left, lb.left)
-                h = min(tbox.top, lb.top) - max(tbox.bottom, lb.bottom)
-                if -0.1 < w <= 0.02 and h > 0.5 * min(tbox.height, lb.height):
-                    return ("warning", f"'{txt.id}' touches the {which} of '{other.id}' on the "
-                                       f"same line ({max(0.0, -w):.2f} units apart, measured): they "
-                                       "read as one", )
+                # glyphs this close to a number or label read as part of it
+                gaps = [max(lb.left - g.right, g.left - lb.right, lb.bottom - g.top, g.bottom - lb.top)
+                        for g in glyphs]
+                if gaps and min(gaps) < 0.08:
+                    return ("warning", f"'{txt.id}' touches the {which} of '{other.id}' "
+                                       f"({max(0.0, min(gaps)):.2f} units apart, measured): they "
+                                       "read as one")
         if static_only and other.kind != "plot":
             return None
         pts = (geo.axes_points(other.id) if static_only else geo.curve_points(other.id)) \
             if other.kind == "plot" else geo.ink(other.id)
-        hits = sum(1 for p in pts if _inside(p, tbox))
+        # a shape against the glyphs themselves (a label's box has empty corners)
+        boxes = (geo.glyph_boxes(txt.id) or [tbox]) if other.kind == "shape" else [tbox]
+        hits = sum(1 for p in pts if any(_inside(p, g) for g in boxes))
         if hits:
             what = "the curves/axes of" if other.kind == "plot" else "the outline of"
             return ("warning", f"'{txt.id}' is crossed by {what} '{other.id}' (measured)")
-        if other.kind == "shape" and any(_inside(p, tbox, shrink=-STROKE_CLEARANCE) for p in pts):
+        if other.kind == "shape" and any(_inside(p, g, shrink=-STROKE_CLEARANCE)
+                                         for p in pts for g in boxes):
             # the stroke has a width: a glyph this close to its centre line touches it
             return ("warning", f"'{txt.id}' touches the outline of '{other.id}' (measured)")
         return None
@@ -1149,7 +1154,7 @@ def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
 
 
 STROKE_CLEARANCE = 0.05  # units from a stroke's centre line where a glyph touches it
-MIN_NUMBER_CONTRAST = 3.5  # tick numbers under a fill: WCAG 3:1 for large text, plus a margin for 24pt
+MIN_NUMBER_CONTRAST = 3.0  # tick numbers under a fill (WCAG's 3:1 for large text)
 MIN_GLYPH_SIZE = 12.0  # pt: a subscript is ~0.7 and a sub-subscript ~0.5 of the size
 
 
@@ -1222,10 +1227,12 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                                 target=obj.id))
         for what, col in _explicit_colors(obj):
             c = contrast(col, bg)
-            if c is not None and c < MIN_CONTRAST:
+            need = MIN_TEXT_CONTRAST if obj.kind in TEXTLIKE else MIN_CONTRAST
+            if c is not None and c < need:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"{what} is {col} on the {theme_name} background {bg} (contrast "
-                                f"{c:.2f}:1): nearly invisible", "pick a color that contrasts with "
+                                f"{c:.2f}:1): " + ("nearly invisible" if c < MIN_CONTRAST else "hard to read as text"),
+                                "pick a color that contrasts with "
                                 "the theme, or omit color to use the theme's palette", target=obj.id))
         z = zoom.get(obj.id, 1.0)
         if obj.kind == "text":
