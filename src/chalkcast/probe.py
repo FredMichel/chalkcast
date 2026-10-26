@@ -287,6 +287,8 @@ def measure(module_path: str, spec: dict[str, Any]) -> dict[str, Any]:
         for mob in m.get_family():  # settle updaters (anchored shapes, redraws)
             mob.update(0)
         objects[oid] = {"kind": kind, "bbox": _bbox(m)}
+        if kind in ("text", "equation"):  # glyph boxes: a fraction's box has empty corners
+            objects[oid]["glyphs"] = [b for g in m.family_members_with_points()[:300] if (b := _bbox(g))]
         # only dots (\cdots, \ldots): there is no letter to compare with
         if kind == "equation" and re.sub(r"\\[lcv]?dots|\\cdot|[.,\s{}]", "", o.get("tex") or ""):
             objects[oid]["glyph_pt"] = _smallest_glyph_pt(m)

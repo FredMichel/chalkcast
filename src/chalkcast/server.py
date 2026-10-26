@@ -33,7 +33,7 @@ from .codegen import _KNOWN_COLORS
 from .envelope import err, ok
 from .expr import ExprError, validate
 from .fix import apply_fixes
-from .model import STEP_KINDS, Obj, Project, Scene
+from .model import STEP_KINDS, Obj, Project, Scene, plot_to_scene
 from .verify import obj_params, overlay_error, GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
 
 mcp = _Server("chalkcast")
@@ -57,19 +57,7 @@ _STEP_ARGS: dict[str, set[str]] = {
 # ---------------------------------------------------------------------------
 
 def _to_scene(plot: Obj) -> dict[str, Any]:
-    """Data -> scene coordinates of a plot (exact: codegen centres the data rectangle)."""
-    p = plot.payload
-    (x0, x1), (y0, y1) = p["x_range"][:2], p["y_range"][:2]
-    sx = plot.scale * float(p.get("width", 8.0)) / (x1 - x0)
-    sy = plot.scale * float(p.get("height", 5.0)) / (y1 - y0)
-    cx, cy = plot.position
-    ox, oy = cx - sx * (x0 + x1) / 2, cy - sy * (y0 + y1) / 2
-    # data centre -> plot centre: exact for offset ranges ([2000, 2024]) and tiny units
-    xc, yc = (x0 + x1) / 2, (y0 + y1) / 2
-    return {"formula": f"scene = ({cx!r} + {sx!r}*(u - {xc!r}), {cy!r} + {sy!r}*(v - {yc!r})) "
-                       "for data (u, v)",
-            "origin": [ox, oy], "x_unit": sx, "y_unit": sy, "data_centre": [xc, yc],
-            "scene_centre": [cx, cy]}
+    return plot_to_scene(plot)
 
 
 def _no_project(project_id: str | None) -> str:
@@ -299,6 +287,10 @@ def inspect_project(project_id: str | None = None) -> dict[str, Any]:
     obls = [{**o, "stale": True} if o["scene"] in changed else o
             for o in project.obligations if o["status"] == "open"]
     d = project.to_dict()
+    for sd, sc in zip(d["scenes"], project.scenes):  # current data -> scene mapping per plot
+        for od, ob in zip(sd["objects"], sc.objects):
+            if ob.kind == "plot":
+                od["to_scene"] = plot_to_scene(ob)
     if "open_obligations" in d:
         d["open_obligations"] = obls
     return ok(d, obligations=obls, coverage={"scope": project.id},
@@ -1021,7 +1013,10 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
     """Automatically repair measured problems that have a mechanical fix: objects
     pushed back inside the frame, labels moved to the nearest free spot, curve
     sampling corrected, too-small text enlarged. Repeats measure->fix up to
-    max_rounds, reports every change, and lists what still needs the author."""
+    max_rounds, reports every change, and lists what still needs the author. A plot
+    moved or scaled takes along what was placed over its data rectangle (dots,
+    labels, segments: they keep their data coordinates), except a frame-centred
+    title written before it; its change carries the new to_scene."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got

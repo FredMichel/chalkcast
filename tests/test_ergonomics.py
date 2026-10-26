@@ -1812,3 +1812,80 @@ def test_fix_leaves_earlier_title(scene):
     pytest.importorskip("manim")
     r = srv.fix_scene()["result"]
     assert not any(c["object"] == t and "moved with it" in c["reason"] for c in r["changes"])
+
+
+# ---- twenty-second audit ----------------------------------------------------------
+
+# W1. camera moves alone show nothing: blank video
+def test_camera_moves_alone_are_blank(scene):
+    _id(srv.add_text("Hello"))
+    srv.add_step("camera_move", zoom=1.5)
+    assert any("video is blank" in o["summary"] for o in _lanes(scene))
+
+
+# W2. a fill painted over its plot's tick numbers
+def test_fill_over_tick_numbers(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "sin(x)"}], x_range=[0, 7], y_range=[-1.5, 1.5], width=9,
+                         height=4, x_label="x", y_label="y", show_numbers=True))
+    a = _id(srv.add_area(plot_id=p, x_min=3.14, x_max=6.28, opacity=0.9))
+    srv.add_step("write", targets=[p, a])
+    r = _measured(scene)
+    assert any(o.get("target") == a and "tick number" in o["summary"] for o in r["obligations"])
+
+
+# W3. a data-point dot written before its plot still follows a fix_scene scale
+def test_fix_scales_dot_written_before_plot(scene):
+    r = srv.add_plot(functions=["x**2/4"], x_range=[-4, 4], y_range=[0, 4], width=15, height=5, y=-0.5)
+    p, m = _id(r), r["result"]["to_scene"]
+    X, Y = m["origin"][0] + 3 * m["x_unit"], m["origin"][1] + 2.25 * m["y_unit"]
+    d = _id(srv.add_shape("dot", x=X, y=Y))
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[p])
+    pytest.importorskip("manim")
+    res = srv.fix_scene()["result"]
+    assert scene.get_obj(p).scale < 1
+    m2 = next(c["to_scene"] for c in res["changes"] if c["object"] == p)
+    want = (m2["origin"][0] + 3 * m2["x_unit"], m2["origin"][1] + 2.25 * m2["y_unit"])
+    assert scene.get_obj(d).position == pytest.approx(want, abs=2e-3)
+
+
+# W4. the equation's glyphs, not its box, decide "printed over"
+def test_tick_number_in_fraction_corner(scene):
+    p = _id(srv.add_plot(functions=["x"], x_range=[-4, 4], y_range=[-1, 4], width=7, height=4.5, y=0.3,
+                         show_numbers=True))
+    srv.add_step("write", targets=[p])
+    pytest.importorskip("manim")
+    from chalkcast import render
+    proj = session.get_project()
+    meas = render.probe_scene(proj, scene, session.workdir(proj.id, scene.id))
+    from chalkcast.verify import Geometry
+    nb = Geometry(scene, meas).number_boxes(p)
+    three = max(nb, key=lambda b: b.cy)  # the top y tick number
+    e = _id(srv.add_equation("\\frac{1}{1+x^2+x^4}"))
+    srv.add_step("write", targets=[e])
+    meas = render.probe_scene(proj, scene, session.workdir(proj.id, scene.id))
+    eb = Geometry(scene, meas).bbox(e)
+    # put the number in the empty top-right corner of the fraction's box
+    srv.update_object(e, x=three.cx - eb.width / 2 + 0.12, y=three.cy - eb.height / 2 + 0.08)
+    r = _measured(scene)
+    assert not any("printed over the tick number" in o["summary"] for o in r["obligations"])
+
+
+# W5. inspect_project gives each plot's current to_scene
+def test_inspect_project_has_to_scene(scene):
+    _id(srv.add_plot(functions=["x"]))
+    obj = srv.inspect_project()["result"]["scenes"][0]["objects"][0]
+    assert "to_scene" in obj
+
+
+# W7. one text over a transform chain of co-located plots: one finding
+def test_one_finding_per_transform_chain(scene):
+    ps = [_id(srv.add_plot(functions=[f"{k}*x"], x_range=[-4, 4], y_range=[-3, 3], y_label="y"))
+          for k in (1, 2, 3)]
+    e = _id(srv.add_equation("y=kx", x=0.4, y=2.75))
+    srv.add_step("write", targets=[ps[0], e])
+    srv.add_step("transform", targets=[ps[0]], to=ps[1])
+    srv.add_step("transform", targets=[ps[0]], to=ps[2])
+    r = _measured(scene)
+    hits = [o for o in r["obligations"] if "printed over" in o["summary"]]
+    assert len(hits) == 1

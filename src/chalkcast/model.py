@@ -277,3 +277,19 @@ class Project:
             "scenes": [{**s.to_dict(), "duration": s.duration(self.fps)} for s in self.scenes],
             "open_obligations": [o for o in self.obligations if o["status"] == "open"],
         }
+
+
+def plot_to_scene(plot: Obj) -> dict[str, Any]:
+    """Data -> scene coordinates of a plot (exact: codegen centres the data rectangle)."""
+    p = plot.payload
+    (x0, x1), (y0, y1) = p["x_range"][:2], p["y_range"][:2]
+    sx = plot.scale * float(p.get("width", 8.0)) / (x1 - x0)
+    sy = plot.scale * float(p.get("height", 5.0)) / (y1 - y0)
+    cx, cy = plot.position
+    ox, oy = cx - sx * (x0 + x1) / 2, cy - sy * (y0 + y1) / 2
+    # data centre -> plot centre: exact for offset ranges ([2000, 2024]) and tiny units
+    xc, yc = (x0 + x1) / 2, (y0 + y1) / 2
+    return {"formula": f"scene = ({cx!r} + {sx!r}*(u - {xc!r}), {cy!r} + {sy!r}*(v - {yc!r})) "
+                       "for data (u, v)",
+            "origin": [ox, oy], "x_unit": sx, "y_unit": sy, "data_centre": [xc, yc],
+            "scene_centre": [cx, cy]}

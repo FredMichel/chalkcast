@@ -19,7 +19,7 @@ import math
 from typing import Any
 
 from .geometry import BBox
-from .model import Scene
+from .model import Scene, plot_to_scene
 from .verify import (DEFAULT_VIEW, MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline, view_margin,
                      visible_views, zoom_while_visible)
 
@@ -215,8 +215,9 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                             or o2.payload.get("anchor") or o2.kind not in ("text", "equation", "shape")):
                         continue
                     px, py = o2.position
-                    if drawn.get(o2.id, 0) < drawn.get(oid, 0):
-                        continue  # written before the plot (a title): not part of it
+                    if (o2.kind in ("text", "equation") and abs(px) < 0.05
+                            and drawn.get(o2.id, 0) < drawn.get(oid, 0)):
+                        continue  # a frame-centred title written before the plot: not part of it
                     if axes.left <= px <= axes.right and axes.bottom <= py <= axes.top:
                         o2.position = follow(px, py)
                         touched.add(o2.id)
@@ -224,7 +225,8 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                                         "reason": f"placed over '{oid}', moved with it"})
             touched.add(oid)
             changes.append({"object": oid, "lane": lane, "position": list(obj.position),
-                            "scale": obj.scale, "reason": o["summary"]})
+                            "scale": obj.scale, "reason": o["summary"],
+                            **({"to_scene": plot_to_scene(obj)} if obj.kind == "plot" else {})})
 
         elif lane == "collision" and geo.measured:
             # move the label (the text-like side) to the nearest free spot

@@ -128,6 +128,9 @@ class Geometry:
     def number_boxes(self, plot_id: str) -> list[BBox]:
         return [b for b in (self._box(x) for x in self._plots.get(plot_id, {}).get("number_boxes", [])) if b]
 
+    def glyph_boxes(self, oid: str) -> list[BBox]:
+        return [b for b in (self._box(x) for x in self._objs.get(oid, {}).get("glyphs", [])) if b]
+
     def glyph_pt(self, oid: str) -> float | None:
         return self._objs.get(oid, {}).get("glyph_pt")
 
@@ -739,6 +742,16 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     return out + _pulse_framing(scene, geo)
 
 
+def _chain_root(scene: Scene, oid: str) -> str:
+    """First object of the transform chain ``oid`` belongs to (a -> b -> c: a)."""
+    src = {st.to: st.targets[0] for st in scene.steps if st.kind == "transform" and st.to and st.targets}
+    seen = set()
+    while oid in src and oid not in seen:
+        seen.add(oid)
+        oid = src[oid]
+    return oid
+
+
 def _draw_order(scene: Scene) -> dict[str, int]:
     """Step at which each object enters the drawing order. A transform destination
     is never added itself: the source keeps its place and takes its shape."""
@@ -824,10 +837,13 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if other.kind == "plot" and tbox:
             # the plot's own texts: axis labels and tick numbers
             marks = geo.named_label_boxes(other.id) + [("tick number", b) for b in geo.number_boxes(other.id)]
+            glyphs = geo.glyph_boxes(txt.id) or [tbox]
             for which, lb in marks:
                 w = min(tbox.right, lb.right) - max(tbox.left, lb.left)
                 h = min(tbox.top, lb.top) - max(tbox.bottom, lb.bottom)
-                if w > 0.02 and h > 0.02:  # glyph boxes really intersect
+                inked = any(min(g.right, lb.right) - max(g.left, lb.left) > 0.02
+                            and min(g.top, lb.top) - max(g.bottom, lb.bottom) > 0.02 for g in glyphs)
+                if w > 0.02 and h > 0.02 and inked:  # glyphs really intersect
                     return ("error", f"'{txt.id}' is printed over the {which} of '{other.id}' "
                                      f"({w:.2f} x {h:.2f} units, measured)")
             for which, lb in marks:
@@ -882,12 +898,20 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
             for j in range(i + 1, len(geoms)):
                 key = tuple(sorted((geoms[i], geoms[j])))
                 together[key] = together.get(key, False) or n in init
+    printed: set[tuple[str, str, str]] = set()
     for key, initial in together.items():
         seen.add(key)
         a, b = scene.get_obj(key[0]), scene.get_obj(key[1])
         if a is None or b is None:
             continue
         found = _pair_finding(scene, geo, a, b, initial)
+        if found and "printed over" in found[1]:
+            txt_id = a.id if a.kind in TEXTLIKE else b.id
+            plot_id = b.id if txt_id == a.id else a.id
+            k = (txt_id, _chain_root(scene, plot_id), found[1].split(" of '")[0])
+            if k in printed:
+                continue
+            printed.add(k)
         if found:
             sev, summary = found
             for g in key:
@@ -940,14 +964,35 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
         lbs = geo.label_boxes(obj.id)
         if not lbs and not geo.number_boxes(obj.id):
             continue
+        pl = obj.payload
         pts = [p for c in geo.curves(obj.id) for p in c.get("points", [])] + geo.moving_points(obj.id)
+        still = [p for c in geo.curves(obj.id) for p in c.get("points", [])]
         hit = [nb for nb in geo.number_boxes(obj.id)
                if sum(_inside(p, nb, shrink=0.0) for p in pts) >= 2]
         if hit:
+            moving = not any(sum(_inside(p, nb, shrink=0.0) for p in still) >= 2 for nb in hit)
+            pl = obj.payload
+            zero_in = all(float(r[0]) <= 0 <= float(r[1]) for r in (pl["x_range"], pl["y_range"]))
             out.append(_obl(scene.id, "collision", "warning",
-                            f"a curve of '{obj.id}' runs through {len(hit)} of its tick numbers "
-                            "(measured)", "change y_range/x_range so the axes sit clear of the "
-                            "curve (e.g. include 0), or drop show_numbers", target=obj.id))
+                            f"a curve of '{obj.id}' runs through {len(hit)} of its tick numbers"
+                            + (" while it moves (tween)" if moving else "") + " (measured)",
+                            "drop show_numbers, or use a larger tick step so fewer numbers sit "
+                            "on the curve" if zero_in else
+                            "include 0 in x_range/y_range so the axes sit clear of the curve, "
+                            "or drop show_numbers", target=obj.id))
+        # #2 a fill painted over its own plot's tick numbers
+        if pl_fills := [f for f in scene.objects if f.kind in ("area", "riemann")
+                        and f.payload.get("plot") == obj.id]:
+            for f in pl_fills:
+                op = float(f.payload.get("opacity", 0.5)) if f.kind == "area" else 0.6
+                covered = [nb for nb in geo.number_boxes(obj.id)
+                           if (geo.fill_cover(f.id, nb) or 0) >= 0.4]
+                if covered and op >= 0.5:
+                    out.append(_obl(scene.id, "collision", "warning",
+                                    f"the fill '{f.id}' (opacity {op}) covers {len(covered)} tick "
+                                    f"number(s) of '{obj.id}' (measured)",
+                                    "lower its opacity (e.g. 0.35), or drop show_numbers",
+                                    target=f.id, other=obj.id))
         static = [p for c in geo.curves(obj.id) for p in c.get("points", [])]
         axes = geo.axes_box(obj.id)
         for which, lb in geo.named_label_boxes(obj.id):
@@ -1331,7 +1376,7 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
         used = set()
         for st in scene.steps:
             used.update(st.targets)
-            if st.to:
+            if st.to and st.kind == "transform":  # a camera_move's `to` is its zoom@focus
                 used.add(st.to)
         if not used:
             out.append(_obl(scene.id, "timing", "error",
