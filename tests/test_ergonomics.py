@@ -2099,3 +2099,128 @@ def test_wide_point_label_stays_by_its_dot(scene):
 def test_bitwise_operator_hint(scene, expr, hint):
     p = srv.add_plot(functions=[expr])
     assert p["ok"] is False and hint in p["error"]
+
+
+# ---- twenty-sixth audit ----------------------------------------------------------
+
+def _gen_lines(scene):
+    return [ln.strip() for ln in generate_module(scene, "chalkboard").splitlines()]
+
+
+# AA1. a fill's outline keeps its closing corners: inside is inside, outside is outside
+def test_fill_outline_keeps_its_corners(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "x**2"}], x_range=[0, 3], y_range=[0, 9], width=8, height=5.5))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=3, color="YELLOW", opacity=0.9))
+    sx = lambda u: (u - 1.5) * 8 / 3  # noqa: E731
+    sy = lambda v: (v - 4.5) * 5.5 / 9  # noqa: E731
+    out = _id(srv.add_text("outside", x=sx(1.2), y=sy(5.5), font_size=24))
+    ins = _id(srv.add_text("inside", x=sx(2.5), y=sy(1.0), font_size=24))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[out, ins])
+    r = _measured(scene)
+    on_fill = {o["target"] for o in r["obligations"] if "written on the fill" in o["summary"]}
+    assert ins in on_fill and out not in on_fill
+
+
+# AA2. a fill on a transform destination re-stacks the curve actually on screen
+def test_restack_after_transform(scene):
+    p1 = _id(srv.add_plot(functions=["x"], x_range=[0, 3], y_range=[0, 9]))
+    p2 = _id(srv.add_plot(functions=["x**2"], x_range=[0, 3], y_range=[0, 9]))
+    a = _id(srv.add_area(plot_id=p2, x_min=0, x_max=2.5, opacity=0.8))
+    srv.add_step("write", targets=[p1])
+    srv.add_step("transform", targets=[p1], to=p2)
+    srv.add_step("write", targets=[a])
+    lines = _gen_lines(scene)
+    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"self.play(Create({a}"))
+    assert lines[i + 1] == f"self.add(ns['{p1}_g1'])"
+
+
+# AA3. a curve faded in the same beat as its fill appears is not brought back
+def test_no_restack_of_a_faded_curve(scene):
+    p = _id(srv.add_plot(functions=["x**2/4"], x_range=[-3, 3], y_range=[0, 3]))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=2))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    srv.add_step("fade", targets=[p], with_previous=True)
+    srv.add_step("wait", duration=1)
+    assert not any(ln.startswith("self.add(") for ln in _gen_lines(scene))
+
+
+# AA4. every curve of the plot goes back above every fill on it
+def test_restack_all_curves(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "x**2/4"}, {"expr": "x/2+1.2"}], x_range=[-3, 3],
+                         y_range=[0, 3]))
+    g = _id(srv.add_area(plot_id=p, x_min=0, x_max=2, function_index=1, color="GREEN"))
+    r = _id(srv.add_area(plot_id=p, x_min=-1, x_max=2.5, function_index=2, color="RED", opacity=0.6))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[g])
+    srv.add_step("write", targets=[r])
+    lines = _gen_lines(scene)
+    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"self.play(Create({r}"))
+    assert lines[i + 1:i + 3] == [f"self.add(ns['{p}_g1'])", f"self.add(ns['{p}_g2'])"]
+
+
+# AA5. fix_scene does not carry a title written first into the plot to dodge a later arrow
+def test_fix_keeps_an_earlier_title(scene):
+    pytest.importorskip("manim")
+    t = _id(srv.add_text("Simply supported beam under a point load", y=3.3, font_size=32))
+    p = _id(srv.add_plot(functions=[{"expr": "-x*(1-x)"}], x_range=[0, 1, 0.25], y_range=[-0.4, 0.2, 0.2],
+                         y=-0.3, width=10, height=4))
+    a = _id(srv.add_shape("arrow", x1=0, y1=3.6, x2=0, y2=1.2, color="RED"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    r = srv.fix_scene()["result"]
+    assert scene.get_obj(t).position[1] == pytest.approx(3.3)
+    assert any(f"move '{a}' instead" in s for s in r["not_auto_fixable"])
+
+
+# AA6. a label painted over by a fill is moved off it, not nudged under it
+def test_fix_moves_label_off_the_fill(scene):
+    pytest.importorskip("manim")
+    p = _id(srv.add_plot(functions=["x**2/4"], x_range=[-3, 3], y_range=[0, 3]))
+    t = _id(srv.add_text("area", x=1.5, y=-2.0, font_size=28))
+    a = _id(srv.add_area(plot_id=p, x_min=-2, x_max=2.5))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[a])
+    srv.fix_scene()
+    r = _measured(scene)
+    assert not any("painted over" in o["summary"] for o in r["obligations"])
+
+
+# AA7. text on a fill that appears through a transform is contrast-checked too
+def test_text_on_a_transformed_fill(scene):
+    p = _id(srv.add_plot(functions=["0.5*x+1"], x_range=[0, 4], y_range=[0, 4]))
+    a1 = _id(srv.add_area(plot_id=p, x_min=0, x_max=0.5, opacity=0.3))
+    a2 = _id(srv.add_area(plot_id=p, x_min=0, x_max=4, color="YELLOW", opacity=0.95))
+    t = _id(srv.add_text("W", x=-1.6, y=-1.2))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a1])
+    srv.add_step("write", targets=[t])
+    srv.add_step("transform", targets=[a1], to=a2)
+    r = _measured(scene)
+    assert any(o.get("target") == t and "written on the fill" in o["summary"] for o in r["obligations"])
+
+
+# AA8. an orbit is traced from where the parameters stand when its dot appears
+def test_orbit_route_starts_at_beat_start(scene):
+    p = _id(srv.add_plot(x_range=[-1.5, 1.5], y_range=[-1.5, 1.5], width=6, height=6))
+    srv.add_parameter("t", 0)
+    txt = _id(srv.add_text("top", x=1.2, y=2.0, font_size=26))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="cos(t)", at_y="sin(t)"))
+    srv.add_step("write", targets=[p, txt])
+    srv.add_step("tween", param="t", value=3.14159, duration=2)
+    srv.add_step("write", targets=[d])
+    srv.add_step("tween", param="t", value=6.28318, duration=2)
+    r = _measured(scene)
+    assert not any("is crossed by" in o["summary"] for o in r["obligations"])
+
+
+# AA9. resetting an area's colour gives the same colour as a new area
+def test_area_color_reset_matches_default(scene):
+    p = _id(srv.add_plot(functions=["x"], x_range=[0, 3], y_range=[0, 3]))
+    a = _id(srv.add_area(plot_id=p, x_min=1, x_max=2, color="RED"))
+    srv.update_object(a, color="default")
+    assert scene.get_obj(a).color == "BLUE"

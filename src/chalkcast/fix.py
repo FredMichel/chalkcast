@@ -59,11 +59,14 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
     pts: list[list[float]] = []
     boxes: list[BBox] = []
     marks: list[BBox] = []  # a plot's own texts: keep a wider gap (not part of the axes)
+    fills: list[str] = []
     for g in others:
         o = scene.get_obj(g)
         if o is None:
             continue
-        if o.kind == "plot":
+        if o.kind in ("area", "riemann"):
+            fills.append(g)
+        elif o.kind == "plot":
             pts += geo.curve_points(g) + geo.moving_points(g)
             marks += [lb for _, lb in geo.named_label_boxes(g)] + geo.number_boxes(g)
         elif o.kind == "shape":
@@ -84,6 +87,8 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
             return False
         if any(b.left - pad <= p[0] <= b.right + pad and b.bottom - pad <= p[1] <= b.top + pad for p in pts):
             return False
+        if any((geo.fill_cover(f, b) or 0) >= 0.25 for f in fills):
+            return False  # under (or on) a fill: painted over, or read against its colour
         gap = 0.1  # labels next to each other keep a visible gap
         if not all(b.overlap_area(BBox(cx=o.cx, cy=o.cy, width=o.width + 2 * gap,
                                        height=o.height + 2 * gap)) <= 0 for o in boxes):
@@ -266,6 +271,15 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
             spot = _free_spot(scene, geo, target, box) if box else None
             if spot is None:
                 unresolved.append(o)
+                continue
+            other = next((c for c in (oid, o.get("other")) if c and c != target), None)
+            if (other and scene.get_obj(other) and scene.get_obj(other).kind not in TEXTLIKE
+                    and first.get(target, 0) < first.get(other, 0) and math.hypot(*spot) > 0.5):
+                # written first (a title): it keeps its place; what came later moves
+                unresolved.append({**o, "summary": o["summary"] + f": '{target}' was written "
+                                   f"before '{other}' and the nearest free spot is "
+                                   f"{math.hypot(*spot):.2f} units away; move '{other}' instead "
+                                   "(fix_scene moves text and equations only)"})
                 continue
             # a point's label must stay by its point: far away it reads as another's.
             # Distances run from the dot to the label's nearest edge (a wide label's

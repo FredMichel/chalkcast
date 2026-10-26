@@ -1034,8 +1034,9 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     for st in geo.states:
         by_beat.setdefault(int(st.get("step", 0)), []).append(st)
     prev_boxes: dict[str, BBox] = {}
-    prev_params: dict[str, dict[str, float]] = {}
+    beat_params = dict(scene.params)  # the parameters as each beat starts
     for start in sorted(by_beat):
+        start_params, beat_params = beat_params, dict(by_beat[start][-1].get("params") or beat_params)
         during, _after = windows.get(start, ([], []))
         shown_with: dict[str, set[str]] = {}
         for i in during:
@@ -1046,13 +1047,12 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
             mobj = scene.get_obj(mover)
             if mobj is None or mobj.kind != "shape" or mover not in shown_with:
                 continue
-            path = [(prev_boxes.get(mover) or geo.bbox(mover),
-                     prev_params.get(mover, dict(scene.params)))]
+            path = [(prev_boxes.get(mover) or geo.bbox(mover), start_params)]
             path += [(geo._box(st["objects"].get(mover)), st.get("params"))
                      for st in by_beat[start]]
             path = [(b, pv) for b, pv in path if b]
             if path:
-                prev_boxes[mover], prev_params[mover] = path[-1][0], path[-1][1] or {}
+                prev_boxes[mover] = path[-1][0]
             route = _anchor_route(scene, mobj)
             for tid in shown_with[mover]:
                 tobj = scene.get_obj(tid)
@@ -1232,13 +1232,22 @@ def _crowded_ticks(obj: Obj) -> str | None:
     return None
 
 
-def _shown_span(scene: Scene, oid: str) -> tuple[float, float]:
-    """(step written, step faded) of an object; inf when never written or never faded."""
+def _shown_span(scene: Scene, oid: str, seen: frozenset[str] = frozenset()) -> tuple[float, float]:
+    """(step shown, step gone) of an object; inf when never shown or never gone. A
+    transform's destination is shown from that step; its source is gone then."""
     start, end = float("inf"), float("inf")
     for st in scene.steps:
-        if st.kind == "write" and oid in st.targets and start == float("inf"):
-            start = st.index
-        elif st.kind == "fade" and oid in st.targets and st.index > start:
+        if start == float("inf"):
+            if st.kind == "write" and oid in st.targets:
+                start = st.index
+            elif st.kind == "transform" and st.to == oid and st.targets and st.targets[0] not in seen:
+                src = _shown_span(scene, st.targets[0], seen | {oid})
+                if src[0] < st.index:
+                    start = st.index
+        elif st.kind == "fade" and oid in st.targets:
+            end = st.index
+            break
+        elif st.kind == "transform" and st.targets and st.targets[0] == oid and st.to:
             end = st.index
             break
     return start, end

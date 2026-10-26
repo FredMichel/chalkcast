@@ -444,38 +444,61 @@ def _step_lines(scene: Scene, accent: str = "#ff7eb6") -> list[str]:
     # Each group becomes one self.play(...): a step's targets animate together, and a
     # with_previous step joins the previous step's play.
     groups: list[list[str] | float] = []
+    fills_in: list[bool] = []  # per group: does it bring a fill on screen?
+    shown: dict[str, str] = {}  # object id -> the mobject showing it (a transform's source)
     after: dict[int, list[str]] = {}  # group index -> lines run once its play ends
-    shown: set[str] = set()
+
+    def restack(gi: int) -> None:
+        # Manim stacks in the order objects are added: a fill added after its plot
+        # paints over the curves. Re-adding the curves of every plot under a fill
+        # puts them back on top (Manim draws each mobject once, at its last place).
+        lines = []
+        for oid in list(shown):
+            o = scene.get_obj(oid)
+            if o is None or o.kind not in ("area", "riemann"):
+                continue
+            plot_var = shown.get(o.payload.get("plot", ""))
+            src = scene.get_obj(plot_var or "")
+            if src is None or src.kind != "plot":
+                continue
+            for i in range(1, len(src.payload.get("functions", [])) + 1):
+                ln = f"self.add(ns['{src.id}_g{i}'])"
+                if ln not in lines:
+                    lines.append(ln)
+        if lines:
+            after[gi] = lines
+
     for step in scene.steps:
         if step.kind == "wait":
+            if fills_in and fills_in[-1]:
+                restack(len(groups) - 1)
             groups.append(float(step.duration))
+            fills_in.append(False)
             continue
         anims = _step_anims(scene, step, accent)
         if not anims:
             continue
-        if step.with_previous and groups and isinstance(groups[-1], list):
-            groups[-1].extend(anims)
-        else:
-            groups.append(list(anims))
-        if step.kind == "fade":
-            shown.difference_update(step.targets)
-            continue
-        new = list(step.targets) if step.kind == "write" else []
-        if step.kind == "transform" and step.to and step.targets:
-            new = [step.to] if step.targets[0] in shown else []
-        shown.update(t for t in step.targets if step.kind == "write")
-        for t in new:
-            o = scene.get_obj(t)
-            if o is None or o.kind not in ("area", "riemann"):
-                continue
-            plot = scene.get_obj(o.payload.get("plot", ""))
-            if plot is not None and plot.id in shown:
-                # Manim stacks in the order objects are added: a fill added after
-                # its plot would paint over its own curve. Re-adding the curve
-                # puts it back on top (Manim draws each mobject once, at its
-                # last place in the scene's list).
-                after.setdefault(len(groups) - 1, []).append(
-                    f"self.add(ns['{plot.id}_g{int(o.payload.get('fn', 1))}'])")
+        if not (step.with_previous and groups and isinstance(groups[-1], list)):
+            if fills_in and fills_in[-1]:
+                restack(len(groups) - 1)
+            groups.append([])
+            fills_in.append(False)
+        groups[-1].extend(anims)
+        new: list[str] = []
+        if step.kind == "write":
+            for t in step.targets:
+                shown[t] = t
+            new = list(step.targets)
+        elif step.kind == "fade":
+            for t in step.targets:
+                shown.pop(t, None)
+        elif step.kind == "transform" and step.to and step.targets and step.targets[0] in shown:
+            shown[step.to] = shown.pop(step.targets[0])
+            new = [step.to]
+        if any((o := scene.get_obj(t)) is not None and o.kind in ("area", "riemann") for t in new):
+            fills_in[-1] = True
+    if fills_in and fills_in[-1]:
+        restack(len(groups) - 1)
     lines = []
     for i, g in enumerate(groups):
         lines.append(f"self.wait({g})" if isinstance(g, float) else f"self.play({', '.join(g)})")

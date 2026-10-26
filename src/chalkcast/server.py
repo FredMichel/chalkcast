@@ -756,7 +756,9 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         return err(_unknown_object(object_id, scene, got[0]))
     reset_color = color is not None and color.strip().lower() == "default"
     if reset_color:
-        color = None
+        # an area / Riemann sum's default is the one add_area / add_riemann give
+        color = "BLUE" if obj.kind in ("area", "riemann") else None
+        reset_color = color is None
     if (ce := _color_error(color)):
         return err(ce)
     notes: list[str] = []

@@ -150,8 +150,26 @@ def _fill_polygons(m: Any) -> list[list[list[float]]]:
         for sub in leaf.get_subpaths():
             anchors = list(sub[::4]) + [sub[-1]]
             step = max(1, len(anchors) // 300)
-            out.append([[float(p[0]), float(p[1])] for p in anchors[::step]])
+            # thin a long outline, but keep its corners: dropping (b, f(b)) and
+            # (b, 0) would close the polygon along a diagonal across the fill
+            keep = []
+            for i, p in enumerate(anchors):
+                if i % step == 0 or i == len(anchors) - 1 or _is_corner(anchors, i):
+                    keep.append([float(p[0]), float(p[1])])
+            out.append(keep)
     return out
+
+
+def _is_corner(pts: list[Any], i: int, cos_max: float = 0.94) -> bool:
+    """Does the outline turn by more than ~20 degrees at pts[i]?"""
+    if i == 0 or i >= len(pts) - 1:
+        return True
+    ax, ay = pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]
+    bx, by = pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]
+    na, nb = (ax * ax + ay * ay) ** 0.5, (bx * bx + by * by) ** 0.5
+    if na < 1e-9 or nb < 1e-9:
+        return False
+    return (ax * bx + ay * by) / (na * nb) < cos_max
 
 
 def _path_samples(m: Any, per_leaf: int = 24) -> list[list[float]]:
