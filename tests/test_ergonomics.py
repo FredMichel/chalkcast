@@ -2596,3 +2596,96 @@ def test_still_tween_reported_once(scene):
     sums = [o["summary"] for o in _lanes(scene, "warning")]
     assert any(f"'{p}' is never shown" in s for s in sums)
     assert not any("is not seen" in s for s in sums)
+
+
+# ---- thirty-first audit ----------------------------------------------------------
+
+# AF1. re-writing an object already on screen does not bring it above a later dot
+def test_rewrite_on_screen_keeps_layer(scene):
+    t = _id(srv.add_text("A", font_size=30, color="WHITE"))
+    d = _id(srv.add_shape("dot", size=5, color="BLUE"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[t])
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == t and "hidden under the dot" in o["summary"] and o["severity"] == "error"
+               for o in r["obligations"])
+
+
+# AF2. a label beside a dot and partly under it is a collision fix_scene moves
+def test_label_partly_under_dot_is_moved(scene):
+    pytest.importorskip("manim")
+    d = _id(srv.add_shape("dot", x=0, y=0, size=3, color="YELLOW"))
+    t = _id(srv.add_text("P", x=0.35, y=0, font_size=36))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    o = next(o for o in r["obligations"] if o.get("target") == t)
+    assert "partly covered by the dot" in o["summary"] and "draw order" not in o["suggested_fix"]
+    srv.fix_scene()
+    assert scene.get_obj(t).position != (0.35, 0)
+
+
+# AF3. a dot no longer on screen does not hide the line crossing a label
+def test_faded_dot_does_not_hide_line(scene):
+    ln = _id(srv.add_shape("line", x1=-2, y1=0, x2=2, y2=0))
+    d = _id(srv.add_shape("dot", x=2, y=0, size=4, color="YELLOW"))
+    t = _id(srv.add_text("B", x=2, y=0, font_size=28))
+    srv.add_step("write", targets=[ln])
+    srv.add_step("write", targets=[d])
+    srv.add_step("fade", targets=[d])
+    srv.add_step("write", targets=[t])
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == t and "crossed by the outline" in o["summary"] for o in r["obligations"])
+
+
+# AF4. a dot that a tween leaves on top of a label hides it: an error, as when static
+def test_dot_resting_on_label_after_tween(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["0*x"], x_range=[-2, 10], y_range=[-1, 1], width=8, height=2))
+    lab = _id(srv.add_text("goal", x=2.0, y=0.5, font_size=24))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="1+t", at_y="0.5", size=6, color="YELLOW"))
+    srv.add_step("write", targets=[p, lab])
+    srv.add_step("write", targets=[d])
+    srv.add_step("tween", param="t", value=6, duration=2)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == lab and "where the tween of step" in o["summary"] and o["severity"] == "error"
+               for o in r["obligations"])
+
+
+# AF5. a label on a moving dot is checked against the background once the dot leaves
+def test_label_left_by_moving_dot(scene):
+    srv.add_parameter("t", 0)
+    p = _id(srv.add_plot(functions=["0*x"], x_range=[-2, 10], y_range=[-1, 1], width=8, height=2))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="1+t", at_y="0.5", size=4, color="YELLOW"))
+    lab = _id(srv.add_text("m", x=-2.0, y=0.5, font_size=28, color="BLACK"))
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("write", targets=[lab])
+    srv.add_step("tween", param="t", value=8, duration=2)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == lab and "nearly invisible" in o["summary"] for o in r["obligations"])
+
+
+# AF6. an arrow given by size/x/y has its tip checked under a later dot too
+def test_sized_arrow_tip_under_dot(scene):
+    a = _id(srv.add_shape("arrow", size=3, x=-1.5, y=0, color="RED"))
+    d = _id(srv.add_shape("dot", x=0, y=0, size=5))
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    assert any("tip of" in o["summary"] and "hidden under the dot" in o["summary"] for o in r["obligations"])
+
+
+# AF7. a curve losing part of itself during a tween, or through np.power, is reported
+@pytest.mark.parametrize("expr,tween", [("x**a", 0.5), ("np.power(x, 1/3)", None)])
+def test_not_real_during_scene(scene, expr, tween):
+    srv.add_parameter("a", 1)
+    p = _id(srv.add_plot(functions=[expr], x_range=[-8, 8], y_range=[-3, 8]))
+    srv.add_step("write", targets=[p])
+    if tween is not None:
+        srv.add_step("tween", param="a", value=tween, duration=1)
+    assert any("is not real for x" in o["summary"] for o in _lanes(scene, "warning"))

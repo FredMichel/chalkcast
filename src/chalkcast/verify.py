@@ -338,6 +338,48 @@ def initial_window(scene: Scene) -> set[int]:
     return out
 
 
+def _not_real(scene: Scene) -> list[dict[str, Any]]:
+    """A fractional power of a negative number is complex in Python (NaN through
+    np.power): that part of a curve is not drawn, at any parameter value it reaches."""
+    import numpy as np
+    out = []
+    shown = {g for st in timeline(scene) for g in st.values()} if scene.steps else set()
+    for obj in scene.objects:
+        if obj.kind != "plot" or obj.id not in shown:
+            continue
+        lo, hi = (float(v) for v in obj.payload.get("x_range", [-5, 5])[:2])
+        xs = [lo + (hi - lo) * (k + 0.5) / 24 for k in range(24)]
+        for i, f in enumerate(obj.payload.get("functions", []), 1):
+            expr = str(f.get("expr", "x") if isinstance(f, dict) else f)
+            if "**" not in expr and "power" not in expr:
+                continue
+            try:
+                fn = compile_fn(expr, scene.params)
+            except Exception:  # noqa: BLE001
+                continue
+            for vals, steps in param_moments(scene):
+                bad = []
+                for xv in xs:
+                    try:
+                        with np.errstate(all="ignore"):
+                            y = fn(xv, **vals)
+                    except Exception:  # noqa: BLE001 - poles are another matter
+                        continue
+                    if np.iscomplexobj(y) or ("power" in expr and np.all(np.isnan(y))):
+                        bad.append(xv)
+                if bad:
+                    at = ", ".join(f"{k}={v:.3g}" for k, v in vals.items() if uses_params(expr, {k: 0.0}))
+                    out.append(_obl(scene.id, "range", "warning",
+                                    f"curve {i} of '{obj.id}' ('{expr}') is not real for x in about "
+                                    f"[{min(bad):.3g}, {max(bad):.3g}]" + (f" when {at}" if at else "")
+                                    + " (a fractional power of a negative number): that part is "
+                                    "not drawn",
+                                    "for the real cube root write cbrt(x); for |x|^p write "
+                                    "abs(x)**p, or narrow x_range", target=obj.id))
+                    break
+    return out
+
+
 def param_moments(scene: Scene) -> list[tuple[dict[str, float], set[int]]]:
     """Parameter values the timeline passes through, each with the steps during
     which they are on screen: the declared values, then samples of every tween."""
@@ -818,16 +860,25 @@ def _chain_root(scene: Scene, oid: str) -> str:
 
 
 def _layer(scene: Scene) -> dict[str, tuple[int, int]]:
-    """(step, place among its targets) each object was last drawn at: Manim draws
-    later additions on top, and a write (also a re-write after a fade) adds the
-    object again. A transform's destination is drawn by its source."""
+    """(step, place among its targets) each object was last added to the scene at:
+    Manim draws later additions on top. A write adds an object that is not on
+    screen (first time, or after a fade); re-writing one already there redraws it
+    in place, without bringing it forward. A transform's destination is drawn by
+    its source."""
     out: dict[str, tuple[int, int]] = {}
+    on: set[str] = set()
     for st in scene.steps:
         if st.kind == "write":
             for k, t in enumerate(st.targets):
-                out[t] = (st.index, k)
+                if t not in on:
+                    out[t] = (st.index, k)
+                    on.add(t)
+        elif st.kind == "fade":
+            on.difference_update(st.targets)
         elif st.kind == "transform" and st.to and st.targets and st.targets[0] in out:
             out[st.to] = out[st.targets[0]]
+            if st.targets[0] in on:
+                on.add(st.to)
     return out
 
 
@@ -856,13 +907,34 @@ def _tip_cover(p: dict[str, Any], db: BBox) -> float:
     return sum((x - db.cx) ** 2 + (y - db.cy) ** 2 <= r * r for x, y in pts) / len(pts)
 
 
-def under_later_dots(scene: Scene, geo: Geometry, oid: str,
-                     pts: list[list[float]]) -> list[list[float]]:
-    """The points of ``oid``'s ink not covered by a filled dot drawn after it."""
+def under_later_dots(scene: Scene, geo: Geometry, oid: str, pts: list[list[float]],
+                     with_id: str | None = None) -> list[list[float]]:
+    """The points of ``oid``'s ink covered by no filled dot drawn after it. With
+    ``with_id``, only a dot that stays put and is on screen whenever both are counts."""
     order = _layer(scene)
+    if with_id is not None:
+        (a0, a1), (b0, b1) = _shown_span(scene, oid), _shown_span(scene, with_id)
+        lo, hi = max(a0, b0), min(a1, b1)
+
+    def holds(d: Obj) -> bool:
+        if with_id is None:
+            return True
+        d0, d1 = _shown_span(scene, d.id)
+        # a node recoloured in place by a transform: its dot stays there
+        cur, seen = d.id, {d.id}
+        for st in scene.steps:
+            if st.kind == "transform" and st.targets and st.targets[0] == cur and st.to not in seen:
+                a, b = geo.bbox(cur), geo.bbox(st.to)
+                if not (a and b and is_dot(scene.get_obj(st.to))
+                        and math.hypot(a.cx - b.cx, a.cy - b.cy) < min(a.width, b.width) / 4):
+                    break
+                cur = st.to
+                seen.add(cur)
+                d1 = _shown_span(scene, cur)[1]
+        return not is_dynamic(d, scene) and d0 <= lo and d1 >= hi
     discs = [(b.cx, b.cy, min(b.width, b.height) / 2) for d in scene.objects
              if is_dot(d) and d.id != oid and order.get(d.id, (0, 0)) > order.get(oid, (0, 0))
-             and (b := geo.bbox(d.id))]
+             and holds(d) and (b := geo.bbox(d.id))]
     if not discs:
         return pts
     return [p for p in pts if not any((p[0] - x) ** 2 + (p[1] - y) ** 2 <= r * r for x, y, r in discs)]
@@ -879,9 +951,13 @@ def _under_dot(scene: Scene, geo: Geometry, dot: Obj, other: Obj) -> tuple[str, 
     r = min(db.width, db.height) / 2
     if other.kind in TEXTLIKE:
         tb = geo.bbox(other.id)
-        if tb is not None and _disc_cover(db, tb) >= 0.25:
+        cover = _disc_cover(db, tb) if tb is not None else 0.0
+        if cover >= 0.6:  # a label meant to sit on its node, drawn in the wrong order
             return ("error", f"'{other.id}' is hidden under the dot '{dot.id}' (the dot is drawn "
                              "after it, measured)")
+        if cover >= 0.1:  # a label beside its point, too close: move it
+            return ("warning", f"'{other.id}' is partly covered by the dot '{dot.id}' "
+                               f"(~{cover * 100:.0f}% of it, measured)")
         return None
     pts = geo.ink(other.id)
     if not pts:
@@ -900,7 +976,9 @@ def _under_dot(scene: Scene, geo: Geometry, dot: Obj, other: Obj) -> tuple[str, 
     if sum(inside) >= 0.6 * len(pts):
         return None
     p = other.payload
-    if p.get("shape") == "arrow" and "x2" in p and _tip_cover(p, db) >= 0.5:
+    if p.get("shape") == "arrow" and "x2" not in p and (ab := geo.bbox(other.id)):
+        p = {"x1": ab.left, "y1": ab.cy, "x2": ab.right, "y2": ab.cy, "shape": "arrow"}
+    if p.get("shape") == "arrow" and _tip_cover(p, db) >= 0.5:
         return ("warning", f"the tip of '{other.id}' is hidden under the dot '{dot.id}' (the dot "
                            "is drawn after it, measured)")
     return None
@@ -992,7 +1070,7 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if static_only and other.kind != "plot":
             return None
         pts = (geo.axes_points(other.id) if static_only else geo.curve_points(other.id)) \
-            if other.kind == "plot" else under_later_dots(scene, geo, other.id, geo.ink(other.id))
+            if other.kind == "plot" else under_later_dots(scene, geo, other.id, geo.ink(other.id), txt.id)
         # a shape against the glyphs themselves (a label's box has empty corners)
         boxes = (geo.glyph_boxes(txt.id) or [tbox]) if other.kind == "shape" else [tbox]
         hits = sum(1 for p in pts if any(_inside(p, g) for g in boxes))
@@ -1080,6 +1158,9 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     tl = timeline(scene) if scene.steps else []
     windows = _beat_windows(scene)
     crossed: set[tuple[str, str]] = set()
+    layer = _layer(scene)
+    buried: set[tuple[str, str]] = set()  # a dot left resting on the label: one error
+    last_tween = max((s.index for s in scene.steps if s.kind == "tween"), default=None)
     for st in geo.states:
         start = int(st.get("step", 0))
         if start not in windows:
@@ -1093,9 +1174,25 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                     shown.update(tl[i - 1])
             for tid in dict.fromkeys(shown.values()):  # the shape each label shows
                 tobj = scene.get_obj(tid)
-                if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in crossed:
+                if tobj is None or tobj.kind not in TEXTLIKE:
                     continue
                 tbox = geo.bbox(tid)
+                rest = geo._box(st.get("objects", {}).get(mover)) if st.get("beat_end") else None
+                if (tbox and rest and (tid, mover) not in buried and is_dot(scene.get_obj(mover))
+                        and _disc_cover(rest, tbox) >= 0.25
+                        and layer.get(mover, (0, 0)) > layer.get(tid, (0, 0))
+                        and (after or start == last_tween)):
+                    crossed.add((tid, mover))
+                    out.append(_obl(scene.id, "collision", "error",
+                                    f"'{tid}' is hidden under the dot '{mover}' where the tween of "
+                                    f"step {start} leaves it (measured)",
+                                    "move the label away from where the dot stops, change the "
+                                    "tween's end value, or write the label after the dot",
+                                    target=tid, other=mover, step=start))
+                    buried.add((tid, mover))
+                    continue
+                if (tid, mover) in crossed:
+                    continue
                 if tbox and any(_inside(p, tbox) for p in pts):
                     crossed.add((tid, mover))
                     out.append(_obl(scene.id, "collision", "warning",
@@ -1103,6 +1200,10 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                                     f"of step {start} (measured)",
                                     "move the label out of the path, or limit the tween's range",
                                     target=tid, other=mover, step=start))
+    # the error says it all: drop the "crossed during the tween" warning for that pair
+    out = [o for o in out if not (o["lane"] == "collision" and o["severity"] == "warning"
+                                  and (o.get("target"), o.get("other")) in buried
+                                  and "during or after the tween" in o["summary"])]
     # a plot's own axis labels: a wide label is pushed back on screen, over the
     # axis tip, where its own curve (or a dot on it) can strike through it. Strict
     # overlap: the curve ending 0.1 units before the label is Manim's normal layout.
@@ -1433,7 +1534,8 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
     # a label written on a filled dot (a node) is read against the dot
     order = _layer(scene)
     for d in scene.objects:
-        db = geo.bbox(d.id) if is_dot(d) else None
+        # a dot that moves leaves the label behind: only a still one lies under it
+        db = geo.bbox(d.id) if is_dot(d) and not is_dynamic(d, scene) else None
         if db is None:
             continue
         d0, d1 = _shown_span(scene, d.id)
@@ -1822,6 +1924,7 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
     obligations.extend(_lane_timing(scene))
     lanes_run.append("range")
     obligations.extend(_lane_overlays(scene))
+    obligations.extend(_not_real(scene))
     if geo.measured:
         lanes_run += ["fidelity"]
         fid, rng = _lane_fidelity(scene, geo)
