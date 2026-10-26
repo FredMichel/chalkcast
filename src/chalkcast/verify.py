@@ -357,7 +357,10 @@ def _not_real(scene: Scene) -> list[dict[str, Any]]:
                 fn = compile_fn(expr, scene.params)
             except Exception:  # noqa: BLE001
                 continue
+            on = {i for i, st in enumerate(timeline(scene), 1) if obj.id in st.values()}
             for vals, steps in param_moments(scene):
+                if not (set(steps) & on):
+                    continue  # the plot is not on screen at these values
                 bad = []
                 for xv in xs:
                     try:
@@ -955,9 +958,11 @@ def _under_dot(scene: Scene, geo: Geometry, dot: Obj, other: Obj) -> tuple[str, 
         if cover >= 0.6:  # a label meant to sit on its node, drawn in the wrong order
             return ("error", f"'{other.id}' is hidden under the dot '{dot.id}' (the dot is drawn "
                              "after it, measured)")
-        if cover >= 0.1:  # a label beside its point, too close: move it
+        glyphs = geo.glyph_boxes(other.id) or ([tb] if tb else [])
+        if cover >= 0.1 or any(_disc_cover(db, g) > 0 for g in glyphs if g.area > 0):
+            # a label beside its point, too close (or a small dot on a few letters): move it
             return ("warning", f"'{other.id}' is partly covered by the dot '{dot.id}' "
-                               f"(~{cover * 100:.0f}% of it, measured)")
+                               f"(~{max(cover, 0.01) * 100:.0f}% of it, measured)")
         return None
     pts = geo.ink(other.id)
     if not pts:
@@ -1160,7 +1165,10 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     crossed: set[tuple[str, str]] = set()
     layer = _layer(scene)
     buried: set[tuple[str, str]] = set()  # a dot left resting on the label: one error
-    last_tween = max((s.index for s in scene.steps if s.kind == "tween"), default=None)
+    def beat_last(i: int) -> int:  # the last step of the beat step i starts
+        while i < len(scene.steps) and scene.steps[i].with_previous:
+            i += 1
+        return i
     for st in geo.states:
         start = int(st.get("step", 0))
         if start not in windows:
@@ -1178,18 +1186,30 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                     continue
                 tbox = geo.bbox(tid)
                 rest = geo._box(st.get("objects", {}).get(mover)) if st.get("beat_end") else None
-                if (tbox and rest and (tid, mover) not in buried and is_dot(scene.get_obj(mover))
-                        and _disc_cover(rest, tbox) >= 0.25
+                last = beat_last(start)
+                # where the dot stops and stays (steps follow, or the scene ends there),
+                # over a label still on screen once the beat is over
+                cover = _disc_cover(rest, tbox) if tbox and rest else 0.0
+                if (cover >= 0.1 and (tid, mover) not in buried and is_dot(scene.get_obj(mover))
+                        and tid in tl[last - 1].values()
                         and layer.get(mover, (0, 0)) > layer.get(tid, (0, 0))
-                        and (after or start == last_tween)):
+                        and (after or last == len(scene.steps))):
                     crossed.add((tid, mover))
-                    out.append(_obl(scene.id, "collision", "error",
-                                    f"'{tid}' is hidden under the dot '{mover}' where the tween of "
-                                    f"step {start} leaves it (measured)",
-                                    "move the label away from where the dot stops, change the "
-                                    "tween's end value, or write the label after the dot",
-                                    target=tid, other=mover, step=start))
                     buried.add((tid, mover))
+                    if cover >= 0.6:  # same thresholds as a dot that does not move
+                        out.append(_obl(scene.id, "collision", "error",
+                                        f"'{tid}' is hidden under the dot '{mover}' where the tween "
+                                        f"of step {start} leaves it (measured)",
+                                        "move the label away from where the dot stops, change the "
+                                        "tween's end value, or write the label after the dot",
+                                        target=tid, other=mover, step=start))
+                    else:
+                        out.append(_obl(scene.id, "collision", "warning",
+                                        f"'{tid}' is partly covered by the dot '{mover}' where the "
+                                        f"tween of step {start} leaves it (~{cover * 100:.0f}% of "
+                                        "it, measured)",
+                                        "move the label away from where the dot stops, or change "
+                                        "the tween's end value", target=tid, other=mover, step=start))
                     continue
                 if (tid, mover) in crossed:
                     continue
@@ -1535,7 +1555,13 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
     order = _layer(scene)
     for d in scene.objects:
         # a dot that moves leaves the label behind: only a still one lies under it
-        db = geo.bbox(d.id) if is_dot(d) and not is_dynamic(d, scene) else None
+        # for good; a moving one is judged where it comes to rest
+        moving = is_dot(d) and is_dynamic(d, scene)
+        if moving:
+            ends = [st_ for st_ in geo.states if st_.get("beat_end") and d.id in st_.get("objects", {})]
+            db = geo._box(ends[-1]["objects"][d.id]) if ends else None
+        else:
+            db = geo.bbox(d.id) if is_dot(d) else None
         if db is None:
             continue
         d0, d1 = _shown_span(scene, d.id)
@@ -1544,9 +1570,10 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
             if tb is None or order.get(t.id, (0, 0)) < order.get(d.id, (0, 0)):
                 continue
             t0, t1 = _shown_span(scene, t.id)
-            if max(d0, t0) >= min(d1, t1) or _disc_cover(db, tb) < 0.9:
+            if max(d0, t0) >= min(d1, t1) or _disc_cover(db, tb) < (0.5 if moving else 0.9):
                 continue
-            spans.setdefault(t.id, []).append((d0, d1))
+            if not moving:
+                spans.setdefault(t.id, []).append((d0, d1))
             col, under = t.color or ink, d.color or ink
             c = contrast(col, under)
             if c is not None and c < MIN_TEXT_CONTRAST:

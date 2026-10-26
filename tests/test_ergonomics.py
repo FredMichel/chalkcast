@@ -2689,3 +2689,85 @@ def test_not_real_during_scene(scene, expr, tween):
     if tween is not None:
         srv.add_step("tween", param="a", value=tween, duration=1)
     assert any("is not real for x" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# ---- thirty-second audit ---------------------------------------------------------
+
+def _goal_scene(**dot):
+    srv.add_parameter("t", dot.pop("t0", 0))
+    p = _id(srv.add_plot(functions=["0*x"], x_range=[-2, 10], y_range=[-1, 1], width=8, height=2))
+    lab = _id(srv.add_text("goal", x=0, y=0.5, font_size=24))
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="1+t", at_y="0.5", size=6, color="YELLOW"))
+    return p, lab, d
+
+
+# AG1. a label faded during the tween that brings the dot onto it is not "hidden"
+def test_label_faded_before_dot_arrives(scene):
+    p, lab, d = _goal_scene()
+    srv.add_step("write", targets=[p, lab])
+    srv.add_step("write", targets=[d])
+    srv.add_step("tween", param="t", value=3, duration=2)
+    srv.add_step("fade", targets=[lab], with_previous=True)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert not any("where the tween" in o["summary"] for o in r["obligations"])
+
+
+# AG2. a dot resting on a label at the end of a beat of parallel tweens is caught
+def test_rest_after_parallel_tweens(scene):
+    p, lab, d = _goal_scene()
+    srv.add_parameter("u", 0)
+    srv.add_step("write", targets=[p, lab])
+    srv.add_step("write", targets=[d])
+    srv.add_step("tween", param="t", value=3, duration=2)
+    srv.add_step("tween", param="u", value=1, duration=2, with_previous=True)
+    r = _measured(scene)
+    assert any(o.get("target") == lab and "hidden under the dot" in o["summary"] and o["severity"] == "error"
+               for o in r["obligations"])
+
+
+# AG3. a dot resting over part of a label: the same "partly covered" warning as a still one
+def test_rest_partly_covering_matches_static(scene):
+    p, lab, d = _goal_scene()
+    srv.add_step("write", targets=[p, lab])
+    srv.add_step("write", targets=[d])
+    srv.add_step("tween", param="t", value=1.95, duration=2)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    o = next(o for o in r["obligations"] if o.get("target") == lab and "where the tween" in o["summary"])
+    assert o["severity"] == "warning" and "partly covered" in o["summary"]
+
+
+# AG4. a label drawn over the place a moving dot comes to rest is contrast-checked
+def test_label_over_resting_dot_contrast(scene):
+    p, lab, d = _goal_scene()
+    srv.add_step("write", targets=[p, d])
+    srv.add_step("write", targets=[lab])
+    srv.add_step("tween", param="t", value=3, duration=2)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == lab and "written on the dot" in o["summary"] for o in r["obligations"])
+
+
+# AG5. the range lane only judges a plot at values it is on screen for
+def test_not_real_only_while_shown(scene):
+    srv.add_parameter("a", 2)
+    p = _id(srv.add_plot(functions=["x**a"], x_range=[-3, 3], y_range=[-2, 8]))
+    q = _id(srv.add_plot(functions=["a*x"], x_range=[-3, 3], y_range=[-2, 8]))
+    srv.add_step("write", targets=[p])
+    srv.add_step("fade", targets=[p])
+    srv.add_step("write", targets=[q])
+    srv.add_step("tween", param="a", value=2.5, duration=1)
+    assert not any("is not real" in o["summary"] for o in _lanes(scene, "warning"))
+
+
+# AG6. a small dot on a few letters says it covers them (not "the outline")
+def test_small_dot_over_letters(scene):
+    t = _id(srv.add_text("terminal velocity"))
+    d = _id(srv.add_shape("dot", x=0, y=0, size=1.5, color="RED"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[d])
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    o = next(o for o in r["obligations"] if o.get("target") == t)
+    assert "partly covered by the dot" in o["summary"]
