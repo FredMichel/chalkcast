@@ -561,7 +561,9 @@ def add_area(plot_id: str, x_min: float = 0.0, x_max: float = 1.0, function_inde
     """Shade the area between a plotted function and the x-axis on [x_min, x_max] (the
     integral). [x_min, x_max] must lie within the plot's x_range, y = 0 must be on the
     axes, and the function must be defined and inside y_range there (otherwise an
-    error says what to widen). It follows its plot (move the plot, not it)."""
+    error says what to widen). It follows its plot (move the plot, not it). Fills
+    lie under everything else (curves, axes, dots, labels), whatever order they are
+    written in; text on a fill is checked against the fill's colour."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -596,7 +598,7 @@ def add_riemann(plot_id: str, x_min: float = 0.0, x_max: float = 1.0, dx: float 
     function on [x_min, x_max] within the plot's x_range; (x_max - x_min)/dx must be a
     whole number, y = 0 must be on the axes and the function inside y_range there.
     Smaller dx = finer; transform coarse->fine to show convergence. They follow
-    their plot."""
+    their plot. Like an area, they lie under every other object."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -1057,7 +1059,8 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
     attempts: dict[str, int] = {}  # repairs tried per curve, so none is retried in a loop
     unresolved: list[dict[str, Any]] = []
     for _ in range(max_rounds):
-        changes, unresolved = apply_fixes(scene, insp["obligations"], probe, attempts)
+        changes, unresolved = apply_fixes(scene, insp["obligations"], probe, attempts,
+                                         theme_name=project.theme)
         if not changes:
             break
         all_changes += changes

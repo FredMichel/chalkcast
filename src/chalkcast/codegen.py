@@ -276,7 +276,9 @@ def plot_is_dynamic(plot: Obj, params: dict[str, float]) -> bool:
 
 def _define_overlay(obj: Obj, scene: Scene) -> list[str]:
     plot = scene.get_obj(obj.payload["plot"])
-    body = _overlay_body(obj)
+    # a fill lies under everything (curves, axes, dots, labels) whatever the order
+    # it is written in: Manim would otherwise paint it over what came before
+    body = _overlay_body(obj) + ".set_z_index(-1)"
     if plot is not None and plot_is_dynamic(plot, scene.params):
         return [f"{obj.id} = always_redraw(lambda: {body})"]
     return [f"{obj.id} = {body}"]
@@ -444,65 +446,19 @@ def _step_lines(scene: Scene, accent: str = "#ff7eb6") -> list[str]:
     # Each group becomes one self.play(...): a step's targets animate together, and a
     # with_previous step joins the previous step's play.
     groups: list[list[str] | float] = []
-    fills_in: list[bool] = []  # per group: does it bring a fill on screen?
-    shown: dict[str, str] = {}  # object id -> the mobject showing it (a transform's source)
-    after: dict[int, list[str]] = {}  # group index -> lines run once its play ends
-
-    def restack(gi: int) -> None:
-        # Manim stacks in the order objects are added: a fill added after its plot
-        # paints over the curves. Re-adding the curves of every plot under a fill
-        # puts them back on top (Manim draws each mobject once, at its last place).
-        lines = []
-        for oid in list(shown):
-            o = scene.get_obj(oid)
-            if o is None or o.kind not in ("area", "riemann"):
-                continue
-            plot_var = shown.get(o.payload.get("plot", ""))
-            src = scene.get_obj(plot_var or "")
-            if src is None or src.kind != "plot":
-                continue
-            for i in range(1, len(src.payload.get("functions", [])) + 1):
-                ln = f"self.add(ns['{src.id}_g{i}'])"
-                if ln not in lines:
-                    lines.append(ln)
-        if lines:
-            after[gi] = lines
-
     for step in scene.steps:
         if step.kind == "wait":
-            if fills_in and fills_in[-1]:
-                restack(len(groups) - 1)
             groups.append(float(step.duration))
-            fills_in.append(False)
             continue
         anims = _step_anims(scene, step, accent)
         if not anims:
             continue
-        if not (step.with_previous and groups and isinstance(groups[-1], list)):
-            if fills_in and fills_in[-1]:
-                restack(len(groups) - 1)
-            groups.append([])
-            fills_in.append(False)
-        groups[-1].extend(anims)
-        new: list[str] = []
-        if step.kind == "write":
-            for t in step.targets:
-                shown[t] = t
-            new = list(step.targets)
-        elif step.kind == "fade":
-            for t in step.targets:
-                shown.pop(t, None)
-        elif step.kind == "transform" and step.to and step.targets and step.targets[0] in shown:
-            shown[step.to] = shown.pop(step.targets[0])
-            new = [step.to]
-        if any((o := scene.get_obj(t)) is not None and o.kind in ("area", "riemann") for t in new):
-            fills_in[-1] = True
-    if fills_in and fills_in[-1]:
-        restack(len(groups) - 1)
-    lines = []
-    for i, g in enumerate(groups):
-        lines.append(f"self.wait({g})" if isinstance(g, float) else f"self.play({', '.join(g)})")
-        lines.extend(after.get(i, []))
+        if step.with_previous and groups and isinstance(groups[-1], list):
+            groups[-1].extend(anims)
+        else:
+            groups.append(list(anims))
+    lines = [f"self.wait({g})" if isinstance(g, float) else f"self.play({', '.join(g)})"
+             for g in groups]
     if groups and not isinstance(groups[-1], float):
         # Manim draws an animation's frames up to (not including) its end state: a
         # scene ending on a play would never show it (half-written text, a tween

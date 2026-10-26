@@ -754,47 +754,15 @@ def _chain_root(scene: Scene, oid: str) -> str:
     return oid
 
 
-def _draw_order(scene: Scene) -> dict[str, int]:
-    """Step at which each object enters the drawing order. A transform destination
-    is never added itself: the source keeps its place and takes its shape."""
-    out: dict[str, int] = {}
-    for st in scene.steps:
-        if st.kind == "write":
-            for t in st.targets:
-                out.setdefault(t, st.index)
-        elif st.kind == "transform" and st.to and st.targets:
-            out.setdefault(st.to, out.get(st.targets[0], st.index))
-    return out
-
-
-def _covered_by_fill(scene: Scene, geo: Geometry, a: Obj, b: Obj) -> tuple[str, str] | None:
-    """A fill drawn after (or with) a label is painted over it: Manim stacks in
-    the order objects are added."""
-    fill, txt = (a, b) if a.kind in ("area", "riemann") else (b, a)
-    if txt.kind not in TEXTLIKE or not geo.measured:
-        return None
-    order = _draw_order(scene)
-    if order.get(fill.id, 0) < order.get(txt.id, 0):
-        return None  # the label is on top
-    fb, tb = geo.bbox(fill.id), geo.bbox(txt.id)
-    if not fb or not tb:
-        return None
-    ov = geo.fill_cover(fill.id, tb)
-    if ov is None:
-        ov = fb.overlap_area(tb) / tb.area
-    if ov >= 0.25:
-        return ("warning", f"'{txt.id}' is painted over by the fill '{fill.id}' (written after it, "
-                           f"covering ~{ov * 100:.0f}% of it; measured)")
-    return None
-
-
 def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
                   initial: bool = True) -> tuple[str, str] | None:
     """(severity, summary) if the two shown shapes genuinely collide, else None.
     ``initial``: whether they are on screen together at the declared parameter
     values (geometry here is measured there; tween states are checked separately)."""
     if a.kind in ("area", "riemann") or b.kind in ("area", "riemann"):
-        return _covered_by_fill(scene, geo, a, b)  # fills sit on their plot by design
+        # fills lie under everything (z_index -1): what is on one is read against
+        # its colour (legibility lane), nothing is painted over
+        return None
     static_only = not initial and (is_dynamic(a, scene) or is_dynamic(b, scene))
     # never together where the moving one started: only what does not move (a
     # plot's axes and labels) is checked here; the moving parts per tween state
@@ -1232,33 +1200,43 @@ def _crowded_ticks(obj: Obj) -> str | None:
     return None
 
 
-def _shown_span(scene: Scene, oid: str, seen: frozenset[str] = frozenset()) -> tuple[float, float]:
-    """(step shown, step gone) of an object; inf when never shown or never gone. A
-    transform's destination is shown from that step; its source is gone then."""
-    start, end = float("inf"), float("inf")
+def _shown_span(scene: Scene, oid: str) -> tuple[float, float]:
+    """(step shown, step gone) of an object; inf when never shown or never gone.
+    A transform's destination is shown from that step by its source's mobject,
+    and is gone when that mobject is faded or morphed into something else."""
+    inf = float("inf")
+    carrier: dict[str, str] = {}  # object id -> the mobject showing it
+    start: float = inf
     for st in scene.steps:
-        if start == float("inf"):
-            if st.kind == "write" and oid in st.targets:
+        if st.kind == "write":
+            for t in st.targets:
+                carrier[t] = t
+            if oid in st.targets and start == inf:
                 start = st.index
-            elif st.kind == "transform" and st.to == oid and st.targets and st.targets[0] not in seen:
-                src = _shown_span(scene, st.targets[0], seen | {oid})
-                if src[0] < st.index:
-                    start = st.index
-        elif st.kind == "fade" and oid in st.targets:
-            end = st.index
-            break
-        elif st.kind == "transform" and st.targets and st.targets[0] == oid and st.to:
-            end = st.index
-            break
-    return start, end
+        elif st.kind == "transform" and st.to and st.targets and st.targets[0] in carrier:
+            mob = carrier.pop(st.targets[0])
+            for k in [k for k, v in carrier.items() if v == mob]:
+                del carrier[k]  # the mobject now shows the destination only
+            carrier[st.to] = mob
+            if st.to == oid and start == inf:
+                start = st.index
+        elif st.kind == "fade":
+            gone = set(st.targets) | {carrier[t] for t in st.targets if t in carrier}
+            for k in [k for k, v in carrier.items() if k in gone or v in gone]:
+                del carrier[k]
+        if start != inf and oid not in carrier:
+            return start, st.index
+    return start, inf
 
 
-def _text_on_fill(scene: Scene, geo: Geometry, bg: str, ink: str) -> list[dict[str, Any]]:
-    """Text written over a fill is read against the fill's colour, not the background."""
-    out = []
+def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
+                  ink: str) -> tuple[list[dict[str, Any]], set[str]]:
+    """Text on a fill (which lies under it) is read against the fill's colour, not
+    the background. Returns the findings and the ids of texts that sit on a fill."""
+    out: list[dict[str, Any]] = []
+    on_fill: set[str] = set()
     if not geo.measured:
-        return out
-    order = _draw_order(scene)
+        return out, on_fill
     for f in scene.objects:
         if f.kind not in ("area", "riemann"):
             continue
@@ -1266,14 +1244,15 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str, ink: str) -> list[dict[s
         under = _blend(f.color or "#5a8fd6", bg, op)
         f0, f1 = _shown_span(scene, f.id)
         for t in scene.objects:
-            if t.kind not in TEXTLIKE or order.get(t.id, -1) < order.get(f.id, 0):
-                continue  # a label under the fill is the collision lane's 'painted over'
+            if t.kind not in TEXTLIKE:
+                continue
             t0, t1 = _shown_span(scene, t.id)
             tb = geo.bbox(t.id)
             if max(f0, t0) >= min(f1, t1) or tb is None:
                 continue  # never on screen together
             if (geo.fill_cover(f.id, tb) or 0) < 0.25:
                 continue
+            on_fill.add(t.id)
             col = t.color or ink
             c = contrast(col, under)
             if c is not None and c < MIN_TEXT_CONTRAST:
@@ -1283,7 +1262,7 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str, ink: str) -> list[dict[s
                                 "move the text off the fill, give it a color that contrasts with "
                                 f"{f.color or 'the fill'}, or lower the fill's opacity",
                                 target=t.id, other=f.id))
-    return out
+    return out, on_fill
 
 
 def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEME) -> list[dict[str, Any]]:
@@ -1292,7 +1271,7 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
     bg = theme(theme_name)["background_color"]
     ink = theme(theme_name)["ink"]
     for f in scene.objects:
-        # a fill drawn over its own plot's tick numbers: what is left of their contrast
+        # a fill under its own plot's tick numbers: the ink read against the fill
         if f.kind not in ("area", "riemann") or not geo.measured:
             continue
         plot = scene.get_obj(f.payload.get("plot", ""))
@@ -1300,17 +1279,18 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
             continue
         op = float(f.payload.get("opacity", 0.5)) if f.kind == "area" else 0.6
         col = f.color or "#5a8fd6"
-        c = contrast(_blend(col, ink, op), _blend(col, bg, op))
+        c = contrast(ink, _blend(col, bg, op))
         covered = [nb for nb in geo.number_boxes(plot.id) if (geo.fill_cover(f.id, nb) or 0) >= 0.4]
         if covered and c is not None and c < MIN_NUMBER_CONTRAST:
             out.append(_obl(scene.id, "legibility", "warning",
                             f"the fill '{f.id}' covers {len(covered)} tick number(s) of '{plot.id}', "
-                            f"which keep a contrast of {c:.2f}:1 under it (measured)",
+                            f"which have a contrast of {c:.2f}:1 on it (measured)",
                             ("lower its opacity (e.g. 0.3) or pick a colour closer to the background, "
                              "or drop show_numbers") if f.kind == "area" else
                             ("pick a colour closer to the background (a Riemann sum's opacity is "
                              "fixed at 0.6), or drop show_numbers"), target=f.id, other=plot.id))
-    out.extend(_text_on_fill(scene, geo, bg, ink))
+    found, on_fill = _text_on_fill(scene, geo, bg, ink)
+    out.extend(found)
     for obj in scene.objects:
         if obj.kind in ("area", "riemann") and obj.color:
             op = float(obj.payload.get("opacity", 0.5)) if obj.kind == "area" else 0.6
@@ -1327,7 +1307,7 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                                 f"the {theme_name} background (contrast {c:.2f}:1)",
                                 "pick a color that contrasts with the theme, or reset it with update_object(color=\"default\")",
                                 target=obj.id))
-        for what, col in _explicit_colors(obj):
+        for what, col in ([] if obj.id in on_fill else _explicit_colors(obj)):
             c = contrast(col, bg)
             need = MIN_TEXT_CONTRAST if obj.kind in TEXTLIKE else MIN_CONTRAST
             if c is not None and c < need:

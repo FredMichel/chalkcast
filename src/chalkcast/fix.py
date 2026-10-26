@@ -20,8 +20,9 @@ from typing import Any
 
 from .geometry import BBox
 from .model import Scene, plot_to_scene
-from .verify import (DEFAULT_VIEW, MIN_FONT_SIZE, TEXTLIKE, Geometry, timeline, view_margin,
-                     visible_views, zoom_while_visible)
+from .themes import DEFAULT_THEME, theme
+from .verify import (DEFAULT_VIEW, MIN_FONT_SIZE, MIN_TEXT_CONTRAST, TEXTLIKE, Geometry, _blend,
+                     contrast, timeline, view_margin, visible_views, zoom_while_visible)
 
 
 
@@ -53,8 +54,12 @@ def _co_visible(scene: Scene, oid: str) -> set[str]:
     return out
 
 
-def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float, float] | None:
+def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox,
+               theme_name: str = DEFAULT_THEME) -> tuple[float, float] | None:
     """Smallest translation putting ``box`` in a free, safe spot."""
+    th = theme(theme_name)
+    tobj = scene.get_obj(oid)
+    tcol = (tobj.color if tobj else None) or th["ink"]
     others = _co_visible(scene, oid)
     pts: list[list[float]] = []
     boxes: list[BBox] = []
@@ -65,7 +70,11 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
         if o is None:
             continue
         if o.kind in ("area", "riemann"):
-            fills.append(g)
+            # text lies on a fill: a spot there is fine when it stays readable
+            op = float(o.payload.get("opacity", 0.5)) if o.kind == "area" else 0.6
+            c = contrast(tcol, _blend(o.color or "#5a8fd6", th["background_color"], op))
+            if c is not None and c < MIN_TEXT_CONTRAST:
+                fills.append(g)
         elif o.kind == "plot":
             pts += geo.curve_points(g) + geo.moving_points(g)
             marks += [lb for _, lb in geo.named_label_boxes(g)] + geo.number_boxes(g)
@@ -88,7 +97,7 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
         if any(b.left - pad <= p[0] <= b.right + pad and b.bottom - pad <= p[1] <= b.top + pad for p in pts):
             return False
         if any((geo.fill_cover(f, b) or 0) >= 0.25 for f in fills):
-            return False  # under (or on) a fill: painted over, or read against its colour
+            return False  # on a fill its colour would make unreadable
         gap = 0.1  # labels next to each other keep a visible gap
         if not all(b.overlap_area(BBox(cx=o.cx, cy=o.cy, width=o.width + 2 * gap,
                                        height=o.height + 2 * gap)) <= 0 for o in boxes):
@@ -119,7 +128,8 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
 
 def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 measurement: dict[str, Any] | None,
-                attempts: dict[str, int] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                attempts: dict[str, int] | None = None,
+                theme_name: str = DEFAULT_THEME) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply mechanical fixes in place. Returns (changes, unresolved obligations)."""
     geo = Geometry(scene, measurement)
     changes: list[dict[str, Any]] = []
@@ -268,13 +278,15 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 continue
             tobj = scene.get_obj(target)
             box = geo.bbox(target)
-            spot = _free_spot(scene, geo, target, box) if box else None
+            spot = _free_spot(scene, geo, target, box, theme_name) if box else None
             if spot is None:
                 unresolved.append(o)
                 continue
             other = next((c for c in (oid, o.get("other")) if c and c != target), None)
-            if (other and scene.get_obj(other) and scene.get_obj(other).kind not in TEXTLIKE
-                    and first.get(target, 0) < first.get(other, 0) and math.hypot(*spot) > 0.5):
+            oo = scene.get_obj(other) if other else None
+            movable = (oo is not None and oo.kind not in TEXTLIKE + ("area", "riemann")
+                       and not oo.payload.get("anchor"))  # the agent can move it itself
+            if (movable and first.get(target, 0) < first.get(other, 0) and math.hypot(*spot) > 0.5):
                 # written first (a title): it keeps its place; what came later moves
                 unresolved.append({**o, "summary": o["summary"] + f": '{target}' was written "
                                    f"before '{other}' and the nearest free spot is "

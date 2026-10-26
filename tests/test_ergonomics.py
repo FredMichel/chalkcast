@@ -13,6 +13,7 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 import chalkcast.server as srv  # noqa: E402
 from chalkcast import session  # noqa: E402
 from chalkcast.codegen import generate_module  # noqa: E402
+from chalkcast.model import plot_to_scene  # noqa: E402
 from chalkcast.verify import inspect_scene  # noqa: E402
 
 
@@ -1149,7 +1150,7 @@ def test_label_on_axis_line(scene):
                for o in r["obligations"])
 
 
-# L5. a fill written after a label paints over it
+# L5. a fill written after a label lies under it (z_index -1), not over it
 def test_fill_over_label(scene):
     p = _id(srv.add_plot(functions=["4 - x**2/4"], x_range=[0, 4], y_range=[0, 5]))
     lab = _id(srv.add_equation(r"\int_0^4 f\,dx \approx 10.7", x=-1.2, y=-0.5, scale=0.8))
@@ -1157,8 +1158,10 @@ def test_fill_over_label(scene):
     srv.add_step("write", targets=[p])
     srv.add_step("write", targets=[lab])
     srv.add_step("write", targets=[rr])
+    assert any(ln.strip().startswith(f"{rr} = ") and ln.rstrip().endswith(".set_z_index(-1)")
+               for ln in generate_module(scene, "chalkboard").splitlines())
     r = _measured(scene)
-    assert any("painted over" in o["summary"] for o in r["obligations"])
+    assert not any("painted over" in o["summary"] for o in r["obligations"])
 
 
 # L6. tick numbers crowded on a short axis
@@ -1572,14 +1575,14 @@ def test_fill_cover_uses_the_outline(scene):
     assert not any("painted over" in o["summary"] for o in r["obligations"])
 
 
-def test_fill_over_label_still_caught(scene):
+def test_fill_under_label_still_judged(scene):
     p = _bell()
     t = _id(srv.add_text("68%", x=0, y=-1.6))
-    a = _id(srv.add_area(plot_id=p, x_min=-1, x_max=1, color="TEAL", opacity=0.6))
+    a = _id(srv.add_area(plot_id=p, x_min=-1, x_max=1, color="YELLOW", opacity=0.9))
     srv.add_step("write", targets=[p, t])
     srv.add_step("write", targets=[a])
     r = _measured(scene)
-    assert any("painted over" in o["summary"] for o in r["obligations"])
+    assert any(o.get("target") == t and "written on the fill" in o["summary"] for o in r["obligations"])
 
 
 # S2. stacking follows the object on screen through transforms
@@ -2009,16 +2012,31 @@ def test_default_fill_and_text_contrast():
 
 # ---- twenty-fifth audit ----------------------------------------------------------
 
-# Z1. a fill written after its plot does not paint over its own curve
+# Z1. a fill written after its plot lies under its curve (and every other object)
 def test_curve_drawn_above_its_fill(scene):
-    p = _id(srv.add_plot(functions=[{"expr": "2-0.25*x**2", "color": "RED"}], x_range=[-3, 3, 1],
-                         y_range=[-1, 3, 1]))
-    a = _id(srv.add_area(plot_id=p, x_min=-2.5, x_max=2.5, color="BLUE", opacity=0.9))
+    pytest.importorskip("manim")
+    p = _id(srv.add_plot(functions=[{"expr": "0.5*x+1", "color": "YELLOW"}], x_range=[0, 4],
+                         y_range=[0, 4]))
+    d = _id(srv.add_shape("dot", size=2, color="WHITE", plot_id=p, at_x="3", at_y="1"))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=4, color="GREEN", opacity=0.8))
     srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[d])
     srv.add_step("write", targets=[a])
-    lines = [ln.strip() for ln in generate_module(scene, "chalkboard").splitlines()]
-    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"self.play(Create({a}"))
-    assert lines[i + 1] == f"self.add(ns['{p}_g1'])"
+    import numpy as np
+    from PIL import Image
+    png = srv.render_frame()["evidence"]["frames"][0]
+    img = np.asarray(Image.open(png).convert("RGB")).astype(int)
+    h, w, _ = img.shape
+    ppu = w / (8 * 16 / 9)  # pixels per scene unit (frame height 8)
+
+    def px(x, y):
+        return img[int(round(h / 2 - y * ppu)), int(round(w / 2 + x * ppu))]
+    m = plot_to_scene(scene.get_obj(p))
+    sx = lambda u: m["origin"][0] + m["x_unit"] * u  # noqa: E731
+    sy = lambda v: m["origin"][1] + m["y_unit"] * v  # noqa: E731
+    assert px(sx(3), sy(1)).min() > 200  # the dot is still white
+    r, g, b = px(sx(1), sy(1.5))
+    assert r > 180 and g > 180 and b < 140  # the line is still yellow over the fill
 
 
 # Z2. text written on an opaque light fill is judged against the fill, not the background
@@ -2123,20 +2141,7 @@ def test_fill_outline_keeps_its_corners(scene):
     assert ins in on_fill and out not in on_fill
 
 
-# AA2. a fill on a transform destination re-stacks the curve actually on screen
-def test_restack_after_transform(scene):
-    p1 = _id(srv.add_plot(functions=["x"], x_range=[0, 3], y_range=[0, 9]))
-    p2 = _id(srv.add_plot(functions=["x**2"], x_range=[0, 3], y_range=[0, 9]))
-    a = _id(srv.add_area(plot_id=p2, x_min=0, x_max=2.5, opacity=0.8))
-    srv.add_step("write", targets=[p1])
-    srv.add_step("transform", targets=[p1], to=p2)
-    srv.add_step("write", targets=[a])
-    lines = _gen_lines(scene)
-    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"self.play(Create({a}"))
-    assert lines[i + 1] == f"self.add(ns['{p1}_g1'])"
-
-
-# AA3. a curve faded in the same beat as its fill appears is not brought back
+# AA3. a curve faded in the same beat as its fill appears stays gone (no re-added curves)
 def test_no_restack_of_a_faded_curve(scene):
     p = _id(srv.add_plot(functions=["x**2/4"], x_range=[-3, 3], y_range=[0, 3]))
     a = _id(srv.add_area(plot_id=p, x_min=0, x_max=2))
@@ -2145,20 +2150,6 @@ def test_no_restack_of_a_faded_curve(scene):
     srv.add_step("fade", targets=[p], with_previous=True)
     srv.add_step("wait", duration=1)
     assert not any(ln.startswith("self.add(") for ln in _gen_lines(scene))
-
-
-# AA4. every curve of the plot goes back above every fill on it
-def test_restack_all_curves(scene):
-    p = _id(srv.add_plot(functions=[{"expr": "x**2/4"}, {"expr": "x/2+1.2"}], x_range=[-3, 3],
-                         y_range=[0, 3]))
-    g = _id(srv.add_area(plot_id=p, x_min=0, x_max=2, function_index=1, color="GREEN"))
-    r = _id(srv.add_area(plot_id=p, x_min=-1, x_max=2.5, function_index=2, color="RED", opacity=0.6))
-    srv.add_step("write", targets=[p])
-    srv.add_step("write", targets=[g])
-    srv.add_step("write", targets=[r])
-    lines = _gen_lines(scene)
-    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"self.play(Create({r}"))
-    assert lines[i + 1:i + 3] == [f"self.add(ns['{p}_g1'])", f"self.add(ns['{p}_g2'])"]
 
 
 # AA5. fix_scene does not carry a title written first into the plot to dodge a later arrow
@@ -2176,7 +2167,7 @@ def test_fix_keeps_an_earlier_title(scene):
     assert any(f"move '{a}' instead" in s for s in r["not_auto_fixable"])
 
 
-# AA6. a label painted over by a fill is moved off it, not nudged under it
+# AA6. a label under a later fill is not "painted over" (the fill lies beneath it)
 def test_fix_moves_label_off_the_fill(scene):
     pytest.importorskip("manim")
     p = _id(srv.add_plot(functions=["x**2/4"], x_range=[-3, 3], y_range=[0, 3]))
@@ -2224,3 +2215,81 @@ def test_area_color_reset_matches_default(scene):
     a = _id(srv.add_area(plot_id=p, x_min=1, x_max=2, color="RED"))
     srv.update_object(a, color="default")
     assert scene.get_obj(a).color == "BLUE"
+
+
+# ---- twenty-seventh audit --------------------------------------------------------
+
+# AB1. dark text on a light fill is judged against the fill, not the background
+def test_dark_text_on_light_fill(scene):
+    p = _id(srv.add_plot(functions=["3-0.3*x**2"], x_range=[-3, 3, 1], y_range=[-1, 3, 1]))
+    a = _id(srv.add_area(plot_id=p, x_min=-2.5, x_max=2.5, color="YELLOW", opacity=0.9))
+    t = _id(srv.add_text("W = 12.5 J", x=0, y=0.5, font_size=30, color="BLACK"))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[t])
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if o.get("target") == t and o["lane"] == "legibility"]
+
+
+# AB2. fix_scene may leave an area's label on the area when it reads well there
+def test_fix_keeps_label_on_its_area(scene):
+    pytest.importorskip("manim")
+    p = _id(srv.add_plot(functions=[{"expr": "2*x"}], x_range=[0, 4, 1], y_range=[0, 8, 2], width=7,
+                         height=5, show_numbers=True))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=3, color="GREEN", opacity=0.5))
+    t = _id(srv.add_text("Work W", x=0, y=-0.125, font_size=30))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[t])
+    srv.fix_scene()
+    m = plot_to_scene(scene.get_obj(p))
+    x, y = scene.get_obj(t).position
+    u, v = (x - m["origin"][0]) / m["x_unit"], (y - m["origin"][1]) / m["y_unit"]
+    assert 0 < v < 2 * u and u < 3  # still inside the triangle it names
+
+
+# AB3. a label under a later fill needs no repair (and is never told to move the fill)
+def test_label_under_later_fill_needs_no_fix(scene):
+    pytest.importorskip("manim")
+    p = _bell()
+    a = _id(srv.add_area(plot_id=p, x_min=-2, x_max=2, color="TEAL", opacity=0.4))
+    t = _id(srv.add_text("95%", x=1.25, y=-1.67, font_size=30))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[a])
+    r = srv.fix_scene()["result"]
+    assert not any(f"move '{a}'" in s for s in r["not_auto_fixable"])
+    assert scene.get_obj(t).position == (1.25, -1.67)
+
+
+# AB4. a transform's destination leaves with its source's fade
+def test_faded_transform_destination_is_gone(scene):
+    p = _id(srv.add_plot(functions=["0.5*x+1"], x_range=[0, 4], y_range=[0, 4]))
+    a1 = _id(srv.add_area(plot_id=p, x_min=0, x_max=0.5, opacity=0.3))
+    a2 = _id(srv.add_area(plot_id=p, x_min=0, x_max=4, color="YELLOW", opacity=0.95))
+    t = _id(srv.add_text("W", x=-1.6, y=-1.2))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a1])
+    srv.add_step("transform", targets=[a1], to=a2)
+    srv.add_step("fade", targets=[a1])
+    srv.add_step("write", targets=[t])
+    r = _measured(scene)
+    assert not any("written on the fill" in o["summary"] for o in r["obligations"])
+
+
+# AB5. fills never reorder the scene: no curves re-added, so a later highlight or a
+# transform into more curves cannot put axes over later objects or leave curves under
+def test_no_restacking_lines(scene):
+    p1 = _id(srv.add_plot(functions=[{"expr": "x", "color": "RED"}], x_range=[0, 3], y_range=[0, 9]))
+    p2 = _id(srv.add_plot(functions=[{"expr": "x", "color": "RED"}, {"expr": "x**2", "color": "GREEN"}],
+                          x_range=[0, 3], y_range=[0, 9]))
+    a = _id(srv.add_area(plot_id=p2, x_min=0, x_max=2.5, function_index=2, opacity=0.9))
+    d = _id(srv.add_shape("dot", plot_id=p2, at_x="1", at_y="0"))
+    srv.add_step("write", targets=[p1])
+    srv.add_step("transform", targets=[p1], to=p2)
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[d])
+    srv.add_step("highlight", targets=[p1])
+    lines = [ln.strip() for ln in generate_module(scene, "chalkboard").splitlines()]
+    assert not any(ln.startswith("self.add(") for ln in lines)
+    assert any(ln.startswith(f"{a} = ") and ln.endswith(".set_z_index(-1)") for ln in lines)
