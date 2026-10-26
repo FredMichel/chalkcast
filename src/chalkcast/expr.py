@@ -40,6 +40,15 @@ _SAFE_BUILTINS: dict[str, Any] = {"sum": sum, "range": range, "abs": abs, "min":
                                   "max": max, "float": float, "int": int}
 
 
+_SYNTAX_HINTS = {
+    ast.BitAnd: " (for 'a and b' on a condition write np.logical_and(a, b), or "
+                "np.where(cond, value, 0) for a piecewise function)",
+    ast.BitOr: " (for 'a or b' on a condition write np.logical_or(a, b))",
+    ast.BitXor: " (for a power write x**2; ^ is not a power in Python)",
+    ast.Invert: " (for 'not' on a condition write np.logical_not(a))",
+}
+
+
 class ExprError(ValueError):
     """An expression that would fail (or is unsafe) at render time."""
 
@@ -67,7 +76,8 @@ def validate(expr: str, params: Iterable[str] = ()) -> None:
     allowed = {"x", "np"} | params | set(MATH_NAMES) | set(_SAFE_BUILTINS) | bound
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODES):
-            raise ExprError(f"unsupported syntax in {expr!r}: {type(node).__name__}")
+            raise ExprError(f"unsupported syntax in {expr!r}: {type(node).__name__}"
+                            f"{_SYNTAX_HINTS.get(type(node), '')}")
         if isinstance(node, ast.Attribute):
             if not (isinstance(node.value, ast.Name) and node.value.id == "np"):
                 raise ExprError(f"only np.<function> attributes are allowed in {expr!r}")

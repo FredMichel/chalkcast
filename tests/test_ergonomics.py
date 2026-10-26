@@ -2005,3 +2005,97 @@ def test_default_fill_and_text_contrast():
     srv.add_step("write", targets=[t])
     assert any("hard to read" in o["summary"]
                for o in inspect_scene(sc, theme_name="whiteboard")["obligations"])
+
+
+# ---- twenty-fifth audit ----------------------------------------------------------
+
+# Z1. a fill written after its plot does not paint over its own curve
+def test_curve_drawn_above_its_fill(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "2-0.25*x**2", "color": "RED"}], x_range=[-3, 3, 1],
+                         y_range=[-1, 3, 1]))
+    a = _id(srv.add_area(plot_id=p, x_min=-2.5, x_max=2.5, color="BLUE", opacity=0.9))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    lines = [ln.strip() for ln in generate_module(scene, "chalkboard").splitlines()]
+    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"self.play(Create({a}"))
+    assert lines[i + 1] == f"self.add(ns['{p}_g1'])"
+
+
+# Z2. text written on an opaque light fill is judged against the fill, not the background
+def test_text_on_a_light_fill(scene):
+    p = _id(srv.add_plot(functions=["3-0.3*x**2"], x_range=[-3, 3, 1], y_range=[-1, 3, 1]))
+    a = _id(srv.add_area(plot_id=p, x_min=-2.5, x_max=2.5, color="YELLOW", opacity=0.9))
+    t = _id(srv.add_text("W = 12.5 J", x=0, y=0.8, font_size=30))
+    srv.add_step("write", targets=[p])
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[t])
+    r = _measured(scene)
+    assert any(o.get("target") == t and "written on the fill" in o["summary"] for o in r["obligations"])
+    srv.update_object(a, color="default", opacity=0.5)
+    r = _measured(scene)
+    assert not any("written on the fill" in o["summary"] for o in r["obligations"])
+
+
+# Z3. a dot on an orbit is traced along its curve, not along chords between samples
+def test_orbit_path_is_traced(scene):
+    p = _id(srv.add_plot(x_range=[-4, 4, 1], y_range=[-3, 3, 1], width=8, height=6))
+    srv.add_parameter("t", 0)
+    d = _id(srv.add_shape("dot", plot_id=p, at_x="3*cos(t)", at_y="2*sin(t)"))
+    clear = _id(srv.add_text("label", x=1.6, y=-0.7, font_size=26))
+    on_path = _id(srv.add_text("apex", x=0, y=2.0, font_size=26))
+    srv.add_step("write", targets=[p, d, clear, on_path])
+    srv.add_step("tween", param="t", value=18.85, duration=10)
+    r = _measured(scene)
+    crossed = {o["target"] for o in r["obligations"] if "is crossed by" in o["summary"]}
+    assert clear not in crossed and on_path in crossed
+
+
+# Z4. an anchored triangle sits on its circumcentre and returns its vertices
+def test_anchored_triangle_vertices(scene):
+    p = _id(srv.add_plot(x_range=[-4, 4], y_range=[-3, 3], width=8, height=6))
+    r = srv.add_shape("triangle", size=1.0, plot_id=p, at_x="1", at_y="0.5")
+    t = _id(r)
+    assert r["result"]["vertices"][0] == pytest.approx([1.0, 1.5])
+    assert any("get_center_of_mass" in ln for ln in generate_module(scene, "chalkboard").splitlines()
+               if ln.strip().startswith(t))
+    srv.add_step("write", targets=[p, t])
+    pytest.importorskip("manim")
+    from chalkcast import render
+    proj = session.get_project()
+    meas = render.probe_scene(proj, scene, session.workdir(proj.id, scene.id))
+    left, right, bottom, top = meas["objects"][t]["bbox"]
+    assert top == pytest.approx(1.5, abs=0.02) and bottom == pytest.approx(0.0, abs=0.02)
+
+
+# Z5. a colour can be reset, as the legibility fixes suggest
+def test_color_can_be_reset(scene):
+    t = _id(srv.add_text("go", color="#1a2a1a"))
+    r = srv.update_object(t, color="default")
+    assert r["ok"] and scene.get_obj(t).color is None
+    srv.add_step("write", targets=[t])
+    assert not any(o["lane"] == "legibility" for o in inspect_scene(scene)["obligations"])
+
+
+# Z6. a wide label right beside its dot is not carried away from it by fix_scene
+def test_wide_point_label_stays_by_its_dot(scene):
+    pytest.importorskip("manim")
+    from chalkcast import render
+    lab = _id(srv.add_text("the point P here", x=1.0, y=0.0, font_size=30))
+    big = _id(srv.add_text("OBSTACLE", x=3.6, y=0, font_size=96))
+    srv.add_step("write", targets=[big])
+    srv.add_step("write", targets=[lab])
+    proj = session.get_project()
+    left = render.probe_scene(proj, scene, session.workdir(proj.id, scene.id))["objects"][lab]["bbox"][0]
+    d = _id(srv.add_shape("dot", x=left - 0.25, y=0))
+    srv.add_step("write", targets=[d], with_previous=True)
+    r = srv.fix_scene()["result"]
+    assert scene.get_obj(lab).position == (1.0, 0.0)
+    assert any("too far to read as its label" in s for s in r["not_auto_fixable"])
+
+
+# Z7. bitwise operators get a hint towards the numpy logical functions
+@pytest.mark.parametrize("expr,hint", [("np.where((x>0)&(x<1), 1, 0)", "np.logical_and"),
+                                       ("(x<0)|(x>1)", "np.logical_or"), ("x^2", "x**2")])
+def test_bitwise_operator_hint(scene, expr, hint):
+    p = srv.add_plot(functions=[expr])
+    assert p["ok"] is False and hint in p["error"]

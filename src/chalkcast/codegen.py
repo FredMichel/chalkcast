@@ -324,9 +324,13 @@ def _define_shape(obj: Obj, ink: str, scene: Scene) -> list[str]:
     xe, ye = str(anchor.get("x", "0")), str(anchor.get("y", "0"))
     lines = _fn_def(f"{var}_at_x", xe, scene.params) + _fn_def(f"{var}_at_y", ye, scene.params)
     where = f"{plot}_ax.c2p(float({var}_at_x(0)), float({var}_at_y(0)))"
+    # a triangle's circumcentre (not its bounding box centre) sits on the anchor
+    centre = ".shift(m.get_center() - m.get_center_of_mass())" if shape == "triangle" else ""
     lines.append(f"{var} = {body}.move_to({where})")
+    if centre:
+        lines.append(f"{var}{centre.replace('m.', var + '.')}")
     if uses_params(xe, scene.params) or uses_params(ye, scene.params):
-        lines.append(f"{var}.add_updater(lambda m: m.move_to({where}))")
+        lines.append(f"{var}.add_updater(lambda m: m.move_to({where}){centre})")
     return lines
 
 
@@ -440,6 +444,8 @@ def _step_lines(scene: Scene, accent: str = "#ff7eb6") -> list[str]:
     # Each group becomes one self.play(...): a step's targets animate together, and a
     # with_previous step joins the previous step's play.
     groups: list[list[str] | float] = []
+    after: dict[int, list[str]] = {}  # group index -> lines run once its play ends
+    shown: set[str] = set()
     for step in scene.steps:
         if step.kind == "wait":
             groups.append(float(step.duration))
@@ -451,8 +457,29 @@ def _step_lines(scene: Scene, accent: str = "#ff7eb6") -> list[str]:
             groups[-1].extend(anims)
         else:
             groups.append(list(anims))
-    lines = [f"self.wait({g})" if isinstance(g, float) else f"self.play({', '.join(g)})"
-             for g in groups]
+        if step.kind == "fade":
+            shown.difference_update(step.targets)
+            continue
+        new = list(step.targets) if step.kind == "write" else []
+        if step.kind == "transform" and step.to and step.targets:
+            new = [step.to] if step.targets[0] in shown else []
+        shown.update(t for t in step.targets if step.kind == "write")
+        for t in new:
+            o = scene.get_obj(t)
+            if o is None or o.kind not in ("area", "riemann"):
+                continue
+            plot = scene.get_obj(o.payload.get("plot", ""))
+            if plot is not None and plot.id in shown:
+                # Manim stacks in the order objects are added: a fill added after
+                # its plot would paint over its own curve. Re-adding the curve
+                # puts it back on top (Manim draws each mobject once, at its
+                # last place in the scene's list).
+                after.setdefault(len(groups) - 1, []).append(
+                    f"self.add(ns['{plot.id}_g{int(o.payload.get('fn', 1))}'])")
+    lines = []
+    for i, g in enumerate(groups):
+        lines.append(f"self.wait({g})" if isinstance(g, float) else f"self.play({', '.join(g)})")
+        lines.extend(after.get(i, []))
     if groups and not isinstance(groups[-1], float):
         # Manim draws an animation's frames up to (not including) its end state: a
         # scene ending on a play would never show it (half-written text, a tween

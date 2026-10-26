@@ -20,6 +20,7 @@ Each problem becomes an *obligation* (SPEC §7): ``error`` blocks export.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .geometry import FRAME_HEIGHT, FRAME_WIDTH, SAFE_MARGIN, BBox
@@ -1033,6 +1034,7 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
     for st in geo.states:
         by_beat.setdefault(int(st.get("step", 0)), []).append(st)
     prev_boxes: dict[str, BBox] = {}
+    prev_params: dict[str, dict[str, float]] = {}
     for start in sorted(by_beat):
         during, _after = windows.get(start, ([], []))
         shown_with: dict[str, set[str]] = {}
@@ -1044,11 +1046,14 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
             mobj = scene.get_obj(mover)
             if mobj is None or mobj.kind != "shape" or mover not in shown_with:
                 continue
-            path = [prev_boxes.get(mover) or geo.bbox(mover)]
-            path += [geo._box(st["objects"].get(mover)) for st in by_beat[start]]
-            path = [b for b in path if b]
+            path = [(prev_boxes.get(mover) or geo.bbox(mover),
+                     prev_params.get(mover, dict(scene.params)))]
+            path += [(geo._box(st["objects"].get(mover)), st.get("params"))
+                     for st in by_beat[start]]
+            path = [(b, pv) for b, pv in path if b]
             if path:
-                prev_boxes[mover] = path[-1]
+                prev_boxes[mover], prev_params[mover] = path[-1][0], path[-1][1] or {}
+            route = _anchor_route(scene, mobj)
             for tid in shown_with[mover]:
                 tobj = scene.get_obj(tid)
                 if tobj is None or tobj.kind not in TEXTLIKE or (tid, mover) in crossed:
@@ -1056,10 +1061,14 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                 tbox = geo.bbox(tid)
                 if tbox is None:
                     continue
-                for p, q in zip(path, path[1:]):
+                for (p, pp), (q, qp) in zip(path, path[1:]):
                     pad = BBox(cx=tbox.cx, cy=tbox.cy, width=tbox.width + max(p.width, q.width),
                                height=tbox.height + max(p.height, q.height))
-                    if _segment_hits(p.cx, p.cy, q.cx, q.cy, pad):
+                    # a dot on a formula follows a curve between samples (an orbit
+                    # sampled 16 times a beat): trace it rather than the chord
+                    pts = route(pp, qp) if route and pp is not None and qp is not None else None
+                    pts = pts or [(p.cx, p.cy), (q.cx, q.cy)]
+                    if any(_segment_hits(*a, *b, pad) for a, b in zip(pts, pts[1:])):
                         crossed.add((tid, mover))
                         out.append(_obl(scene.id, "collision", "warning",
                                         f"'{tid}' is crossed by '{mover}' during the tween of step "
@@ -1068,6 +1077,44 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                                         target=tid, other=mover, step=start))
                         break
     return out
+
+
+ROUTE_SUBSTEPS = 48  # points traced between two measured samples of an anchored shape
+
+
+def _anchor_route(scene: Scene, obj: Obj):
+    """For a shape anchored on a static plot by formulas: f(params_a, params_b) ->
+    the scene points it passes through as the parameters move linearly from a to
+    b (tweens are linear), or None when it cannot be traced."""
+    from .model import plot_to_scene
+    anchor = obj.payload.get("anchor") or {}
+    plot = scene.get_obj(anchor.get("plot", ""))
+    if plot is None or plot.kind != "plot" or is_dynamic(plot, scene):
+        return None
+    try:
+        m = plot_to_scene(plot)
+        fx = compile_fn(str(anchor.get("x", "0")), scene.params)
+        fy = compile_fn(str(anchor.get("y", "0")), scene.params)
+    except Exception:  # noqa: BLE001 - an untraceable anchor keeps the chord test
+        return None
+    (ox, oy), sx, sy = m["origin"], m["x_unit"], m["y_unit"]
+
+    def route(a: dict[str, float], b: dict[str, float]) -> list[tuple[float, float]] | None:
+        out = []
+        for k in range(ROUTE_SUBSTEPS + 1):
+            f = k / ROUTE_SUBSTEPS
+            pv = {n: float(a.get(n, v)) + f * (float(b.get(n, v)) - float(a.get(n, v)))
+                  for n, v in scene.params.items()}
+            try:
+                u, v = float(fx(0, **pv)), float(fy(0, **pv))
+            except Exception:  # noqa: BLE001
+                return None
+            if not (math.isfinite(u) and math.isfinite(v)):
+                return None
+            out.append((ox + sx * u, oy + sy * v))
+        return out
+
+    return route
 
 
 def _segment_hits(x0: float, y0: float, x1: float, y1: float, box: BBox) -> bool:
@@ -1185,6 +1232,51 @@ def _crowded_ticks(obj: Obj) -> str | None:
     return None
 
 
+def _shown_span(scene: Scene, oid: str) -> tuple[float, float]:
+    """(step written, step faded) of an object; inf when never written or never faded."""
+    start, end = float("inf"), float("inf")
+    for st in scene.steps:
+        if st.kind == "write" and oid in st.targets and start == float("inf"):
+            start = st.index
+        elif st.kind == "fade" and oid in st.targets and st.index > start:
+            end = st.index
+            break
+    return start, end
+
+
+def _text_on_fill(scene: Scene, geo: Geometry, bg: str, ink: str) -> list[dict[str, Any]]:
+    """Text written over a fill is read against the fill's colour, not the background."""
+    out = []
+    if not geo.measured:
+        return out
+    order = _draw_order(scene)
+    for f in scene.objects:
+        if f.kind not in ("area", "riemann"):
+            continue
+        op = float(f.payload.get("opacity", 0.5)) if f.kind == "area" else 0.6
+        under = _blend(f.color or "#5a8fd6", bg, op)
+        f0, f1 = _shown_span(scene, f.id)
+        for t in scene.objects:
+            if t.kind not in TEXTLIKE or order.get(t.id, -1) < order.get(f.id, 0):
+                continue  # a label under the fill is the collision lane's 'painted over'
+            t0, t1 = _shown_span(scene, t.id)
+            tb = geo.bbox(t.id)
+            if max(f0, t0) >= min(f1, t1) or tb is None:
+                continue  # never on screen together
+            if (geo.fill_cover(f.id, tb) or 0) < 0.25:
+                continue
+            col = t.color or ink
+            c = contrast(col, under)
+            if c is not None and c < MIN_TEXT_CONTRAST:
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"'{t.id}' ({col}) is written on the fill '{f.id}', where it has a "
+                                f"contrast of {c:.2f}:1 (measured)",
+                                "move the text off the fill, give it a color that contrasts with "
+                                f"{f.color or 'the fill'}, or lower the fill's opacity",
+                                target=t.id, other=f.id))
+    return out
+
+
 def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEME) -> list[dict[str, Any]]:
     out = []
     zoom = zoom_while_visible(scene)  # a zoomed-out camera shrinks everything on screen
@@ -1209,6 +1301,7 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                              "or drop show_numbers") if f.kind == "area" else
                             ("pick a colour closer to the background (a Riemann sum's opacity is "
                              "fixed at 0.6), or drop show_numbers"), target=f.id, other=plot.id))
+    out.extend(_text_on_fill(scene, geo, bg, ink))
     for obj in scene.objects:
         if obj.kind in ("area", "riemann") and obj.color:
             op = float(obj.payload.get("opacity", 0.5)) if obj.kind == "area" else 0.6
@@ -1217,13 +1310,13 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                 out.append(_obl(scene.id, "legibility", "error",
                                 f"fill of '{obj.id}' ({obj.color} at opacity {op}) is the background "
                                 f"colour: it erases the curves and axes under it (contrast {c:.2f}:1)",
-                                "pick a color that contrasts with the theme, or omit color",
+                                "pick a color that contrasts with the theme, or reset it with update_object(color=\"default\")",
                                 target=obj.id))
             elif c is not None and c < MIN_FILL_CONTRAST:
                 out.append(_obl(scene.id, "legibility", "warning",
                                 f"fill of '{obj.id}' ({obj.color} at opacity {op}) barely shows on "
                                 f"the {theme_name} background (contrast {c:.2f}:1)",
-                                "pick a color that contrasts with the theme, or omit color",
+                                "pick a color that contrasts with the theme, or reset it with update_object(color=\"default\")",
                                 target=obj.id))
         for what, col in _explicit_colors(obj):
             c = contrast(col, bg)
@@ -1233,7 +1326,7 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                                 f"{what} is {col} on the {theme_name} background {bg} (contrast "
                                 f"{c:.2f}:1): " + ("nearly invisible" if c < MIN_CONTRAST else "hard to read as text"),
                                 "pick a color that contrasts with "
-                                "the theme, or omit color to use the theme's palette", target=obj.id))
+                                "the theme, or update_object(color=\"default\") to use the theme's palette", target=obj.id))
         z = zoom.get(obj.id, 1.0)
         if obj.kind == "text":
             fs = float(obj.payload.get("font_size", 36)) * obj.scale * z

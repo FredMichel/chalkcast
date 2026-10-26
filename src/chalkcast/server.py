@@ -29,9 +29,9 @@ except ModuleNotFoundError:  # mcp 1.x
 
 from . import render as rnd
 from . import session
-from .codegen import _KNOWN_COLORS
+from .codegen import _KNOWN_COLORS, uses_params
 from .envelope import err, ok
-from .expr import ExprError, validate
+from .expr import ExprError, compile_fn, validate
 from .fix import apply_fixes
 from .model import STEP_KINDS, Obj, Project, Scene, plot_to_scene
 from .verify import obj_params, overlay_error, GEOMETRIC_LANES, beat_conflicts, inspect_scene, is_dynamic, unused_tweens
@@ -534,11 +534,23 @@ def add_shape(shape: str = "circle", size: float | None = None, x: float | None 
     scene.objects.append(Obj(id=oid, kind="shape", position=(x or 0.0, y or 0.0), color=color,
                              payload=payload))
     extra: dict[str, Any] = {}
-    if shape == "triangle" and plot_id is None:
+    if shape == "triangle":
         import math as _m
         r, (cx, cy) = (size or 1.0), (x or 0.0, y or 0.0)
-        extra["vertices"] = [[round(cx + r * _m.cos(_m.radians(a)), 4),
-                              round(cy + r * _m.sin(_m.radians(a)), 4)] for a in (90, 210, 330)]
+        if plot_id is not None:
+            # where the anchor puts it at the declared parameter values
+            m = plot_to_scene(plot)
+            try:
+                u = float(compile_fn(anchor["x"], scene.params)(0, **scene.params))
+                v = float(compile_fn(anchor["y"], scene.params)(0, **scene.params))
+                cx, cy = m["origin"][0] + m["x_unit"] * u, m["origin"][1] + m["y_unit"] * v
+            except Exception:  # noqa: BLE001 - undefined at the start: no vertices to give
+                r = None
+            if r is not None and uses_params(anchor["x"] + " " + anchor["y"], scene.params):
+                extra["vertices_note"] = "at the declared parameter values; they move with the anchor"
+        if r is not None:
+            extra["vertices"] = [[round(cx + r * _m.cos(_m.radians(a)), 4),
+                                  round(cy + r * _m.sin(_m.radians(a)), 4)] for a in (90, 210, 330)]
     return ok({"scene_id": scene.id, "object_id": oid, **extra})
 
 
@@ -733,7 +745,8 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     Explicit line/arrow segments move by their endpoints x1, y1, x2, y2.
     Everything is validated first: on error nothing changes. A plot's color is the
     default color of its curves without one (axes keep the theme ink). Areas, Riemann
-    sums and anchored shapes follow their plot: move the plot instead."""
+    sums and anchored shapes follow their plot: move the plot instead.
+    color="default" removes an explicit color (back to the theme's palette)."""
     got = _require_scene(project_id, scene_id)
     if isinstance(got, dict):
         return got
@@ -741,6 +754,9 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     obj = scene.get_obj(object_id)
     if obj is None:
         return err(_unknown_object(object_id, scene, got[0]))
+    reset_color = color is not None and color.strip().lower() == "default"
+    if reset_color:
+        color = None
     if (ce := _color_error(color)):
         return err(ce)
     notes: list[str] = []
@@ -860,7 +876,7 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
                                         float(dep.payload["x_min"]), float(dep.payload["x_max"]),
                                         dep.kind)):
                     return err(f"'{dep.id}' would break: {e}")
-    if not changed and x is None and y is None and scale is None and color is None:
+    if not changed and x is None and y is None and scale is None and color is None and not reset_color:
         return err("nothing to change; pass at least one field")
     # all checks passed: commit
     obj.payload = p
@@ -881,7 +897,7 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     if scale is not None:
         obj.scale = scale
         changed.append("scale")
-    if color is not None:
+    if color is not None or reset_color:
         obj.color = color
         changed.append("color")
     if obj.kind == "plot" and set(changed) & {"x_range", "y_range", "width", "height", "position",
