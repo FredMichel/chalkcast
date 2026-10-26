@@ -1889,3 +1889,63 @@ def test_one_finding_per_transform_chain(scene):
     r = _measured(scene)
     hits = [o for o in r["obligations"] if "printed over" in o["summary"]]
     assert len(hits) == 1
+
+
+# ---- twenty-third audit -----------------------------------------------------------
+
+def _ticks_plot():
+    return _id(srv.add_plot(functions=[{"expr": "0.3*x"}], x_range=[-4, 4], y_range=[-2, 3], width=8,
+                            height=5, show_numbers=True, x_label="x", y_label="y"))
+
+
+# X1. a thin stroke (minus, fraction bar, \vert) through a tick number is an error
+@pytest.mark.parametrize("tex", ["-", "\\frac{a}{b}", "\\vert"])
+def test_thin_stroke_over_tick_number(scene, tex):
+    p = _ticks_plot()
+    e = _id(srv.add_equation(tex, x=2.0, y=-0.833, color="RED"))
+    srv.add_step("write", targets=[p, e])
+    r = _measured(scene)
+    assert any("printed over the tick number" in o["summary"] and o["severity"] == "error"
+               for o in r["obligations"])
+
+
+# X2. fix_scene does not push a plot into its neighbour; axes that touch are reported
+def test_fix_does_not_push_plot_into_neighbour(scene):
+    a = _id(srv.add_plot(functions=["sin(x)"], x_range=[-4, 4], y_range=[-2, 2], x=-3, width=9.2, height=4))
+    b = _id(srv.add_plot(functions=["cos(x)"], x_range=[0, 4], y_range=[-2, 2], x=4.3, width=3.5, height=4))
+    srv.add_step("write", targets=[a, b])
+    pytest.importorskip("manim")
+    r = srv.fix_scene()["result"]
+    assert not r["changes"] and any("would put its axes over" in w for w in r["not_auto_fixable"])
+
+
+# X3. fill over tick numbers: judged by the contrast left, not opacity alone
+@pytest.mark.parametrize("color,op,warns", [("WHITE", 0.45, True), ("#1d4ed8", 0.3, False)])
+def test_fill_over_numbers_by_contrast(scene, color, op, warns):
+    p = _id(srv.add_plot(functions=["-sin(x)"], x_range=[0, 7], y_range=[-1.5, 1.5], width=9, height=4,
+                         show_numbers=True))
+    a = _id(srv.add_area(plot_id=p, x_min=0, x_max=3.14, color=color, opacity=op))
+    srv.add_step("write", targets=[p, a])
+    r = _measured(scene)
+    got = any(o.get("target") == a and "tick number" in o["summary"] for o in r["obligations"])
+    assert got is warns
+
+
+# X4. the Riemann fill warning does not suggest an opacity it cannot take
+def test_riemann_fill_warning_fix(scene):
+    p = _id(srv.add_plot(functions=["-1.5+0.1*x"], x_range=[0, 4], y_range=[-2, 2], show_numbers=True))
+    rr = _id(srv.add_riemann(p, 0, 3.5, dx=0.5, color="WHITE"))
+    srv.add_step("write", targets=[p, rr])
+    r = _measured(scene)
+    hit = [o for o in r["obligations"] if o.get("target") == rr and "tick number" in o["summary"]]
+    assert hit and "opacity is fixed" in hit[0]["suggested_fix"]
+
+
+# X5. a label touching a drawn line
+def test_label_touching_a_line(scene):
+    ln = _id(srv.add_shape("line", x1=-3, y1=-2, x2=-3, y2=-0.2))
+    e = _id(srv.add_equation("a=3", x=-3.6, y=-1.1))
+    srv.add_step("write", targets=[ln, e])
+    r = _measured(scene)
+    assert any("touches the outline" in o["summary"] or "crossed by" in o["summary"]
+               for o in r["obligations"])

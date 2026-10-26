@@ -838,12 +838,17 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
             # the plot's own texts: axis labels and tick numbers
             marks = geo.named_label_boxes(other.id) + [("tick number", b) for b in geo.number_boxes(other.id)]
             glyphs = geo.glyph_boxes(txt.id) or [tbox]
+
+            def crosses(g: BBox, lb: BBox) -> bool:
+                # a thin stroke (minus, fraction bar, \vert) through a number counts:
+                # it must reach into the box, and run across it in one direction
+                w = min(g.right, lb.right) - max(g.left, lb.left)
+                h = min(g.top, lb.top) - max(g.bottom, lb.bottom)
+                return w > 0.004 and h > 0.004 and max(w, h) > 0.02
             for which, lb in marks:
                 w = min(tbox.right, lb.right) - max(tbox.left, lb.left)
                 h = min(tbox.top, lb.top) - max(tbox.bottom, lb.bottom)
-                inked = any(min(g.right, lb.right) - max(g.left, lb.left) > 0.02
-                            and min(g.top, lb.top) - max(g.bottom, lb.bottom) > 0.02 for g in glyphs)
-                if w > 0.02 and h > 0.02 and inked:  # glyphs really intersect
+                if crosses(tbox, lb) and any(crosses(g, lb) for g in glyphs):  # glyphs really intersect
                     return ("error", f"'{txt.id}' is printed over the {which} of '{other.id}' "
                                      f"({w:.2f} x {h:.2f} units, measured)")
             for which, lb in marks:
@@ -861,6 +866,9 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if hits:
             what = "the curves/axes of" if other.kind == "plot" else "the outline of"
             return ("warning", f"'{txt.id}' is crossed by {what} '{other.id}' (measured)")
+        if other.kind == "shape" and any(_inside(p, tbox, shrink=-STROKE_CLEARANCE) for p in pts):
+            # the stroke has a width: a glyph this close to its centre line touches it
+            return ("warning", f"'{txt.id}' touches the outline of '{other.id}' (measured)")
         return None
     if ka == "plot" and kb == "plot":
         xa, xb = geo.axes_box(a.id), geo.axes_box(b.id)
@@ -873,6 +881,8 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         ratio = ov / min(ba.area, bb.area) if ov > 0 else 0
         if ratio >= MEASURED_TEXT_OVERLAP:
             return ("warning", f"plots '{a.id}' and '{b.id}' overlap without sharing axes (measured)")
+        if xa and xb and xa.overlap_area(xb) > 0.01:
+            return ("warning", f"the axes of '{a.id}' and '{b.id}' run into each other (measured)")
     return None  # shape/shape and shape/plot: annotations and composite drawings
 
 
@@ -980,19 +990,6 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             "on the curve" if zero_in else
                             "include 0 in x_range/y_range so the axes sit clear of the curve, "
                             "or drop show_numbers", target=obj.id))
-        # #2 a fill painted over its own plot's tick numbers
-        if pl_fills := [f for f in scene.objects if f.kind in ("area", "riemann")
-                        and f.payload.get("plot") == obj.id]:
-            for f in pl_fills:
-                op = float(f.payload.get("opacity", 0.5)) if f.kind == "area" else 0.6
-                covered = [nb for nb in geo.number_boxes(obj.id)
-                           if (geo.fill_cover(f.id, nb) or 0) >= 0.4]
-                if covered and op >= 0.5:
-                    out.append(_obl(scene.id, "collision", "warning",
-                                    f"the fill '{f.id}' (opacity {op}) covers {len(covered)} tick "
-                                    f"number(s) of '{obj.id}' (measured)",
-                                    "lower its opacity (e.g. 0.35), or drop show_numbers",
-                                    target=f.id, other=obj.id))
         static = [p for c in geo.curves(obj.id) for p in c.get("points", [])]
         axes = geo.axes_box(obj.id)
         for which, lb in geo.named_label_boxes(obj.id):
@@ -1151,6 +1148,8 @@ def _explicit_colors(obj: Obj) -> list[tuple[str, str]]:
     return out
 
 
+STROKE_CLEARANCE = 0.05  # units from a stroke's centre line where a glyph touches it
+MIN_NUMBER_CONTRAST = 3.5  # tick numbers under a fill: WCAG 3:1 for large text, plus a margin for 24pt
 MIN_GLYPH_SIZE = 12.0  # pt: a subscript is ~0.7 and a sub-subscript ~0.5 of the size
 
 
@@ -1185,6 +1184,26 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
     out = []
     zoom = zoom_while_visible(scene)  # a zoomed-out camera shrinks everything on screen
     bg = theme(theme_name)["background_color"]
+    ink = theme(theme_name)["ink"]
+    for f in scene.objects:
+        # a fill drawn over its own plot's tick numbers: what is left of their contrast
+        if f.kind not in ("area", "riemann") or not geo.measured:
+            continue
+        plot = scene.get_obj(f.payload.get("plot", ""))
+        if plot is None or not plot.payload.get("show_numbers"):
+            continue
+        op = float(f.payload.get("opacity", 0.5)) if f.kind == "area" else 0.6
+        col = f.color or "#5a8fd6"
+        c = contrast(_blend(col, ink, op), _blend(col, bg, op))
+        covered = [nb for nb in geo.number_boxes(plot.id) if (geo.fill_cover(f.id, nb) or 0) >= 0.4]
+        if covered and c is not None and c < MIN_NUMBER_CONTRAST:
+            out.append(_obl(scene.id, "legibility", "warning",
+                            f"the fill '{f.id}' covers {len(covered)} tick number(s) of '{plot.id}', "
+                            f"which keep a contrast of {c:.2f}:1 under it (measured)",
+                            ("lower its opacity (e.g. 0.3) or pick a colour closer to the background, "
+                             "or drop show_numbers") if f.kind == "area" else
+                            ("pick a colour closer to the background (a Riemann sum's opacity is "
+                             "fixed at 0.6), or drop show_numbers"), target=f.id, other=plot.id))
     for obj in scene.objects:
         if obj.kind in ("area", "riemann") and obj.color:
             op = float(obj.payload.get("opacity", 0.5)) if obj.kind == "area" else 0.6

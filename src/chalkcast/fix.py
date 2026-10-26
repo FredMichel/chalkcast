@@ -58,13 +58,14 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
     others = _co_visible(scene, oid)
     pts: list[list[float]] = []
     boxes: list[BBox] = []
+    marks: list[BBox] = []  # a plot's own texts: keep a wider gap (not part of the axes)
     for g in others:
         o = scene.get_obj(g)
         if o is None:
             continue
         if o.kind == "plot":
             pts += geo.curve_points(g) + geo.moving_points(g)
-            boxes += [lb for _, lb in geo.named_label_boxes(g)] + geo.number_boxes(g)
+            marks += [lb for _, lb in geo.named_label_boxes(g)] + geo.number_boxes(g)
         elif o.kind == "shape":
             pts += geo.ink(g) + geo.moving_points(g)
         elif o.kind in TEXTLIKE:
@@ -84,8 +85,12 @@ def _free_spot(scene: Scene, geo: Geometry, oid: str, box: BBox) -> tuple[float,
         if any(b.left - pad <= p[0] <= b.right + pad and b.bottom - pad <= p[1] <= b.top + pad for p in pts):
             return False
         gap = 0.1  # labels next to each other keep a visible gap
+        if not all(b.overlap_area(BBox(cx=o.cx, cy=o.cy, width=o.width + 2 * gap,
+                                       height=o.height + 2 * gap)) <= 0 for o in boxes):
+            return False
+        gap = 0.3  # so a label does not read as a tick number or an axis label
         return all(b.overlap_area(BBox(cx=o.cx, cy=o.cy, width=o.width + 2 * gap,
-                                       height=o.height + 2 * gap)) <= 0 for o in boxes)
+                                       height=o.height + 2 * gap)) <= 0 for o in marks)
 
     best = None
     step = 0.1
@@ -179,6 +184,18 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                 continue
             x, y = obj.position
             f = new_scale / obj.scale if obj.scale else 1.0
+            if obj.kind == "plot" and (ab := geo.axes_box(oid)) is not None:
+                # never push a plot into its neighbour: two axes then read as one
+                moved = BBox(cx=x + dx + (ab.cx - x) * f, cy=y + dy + (ab.cy - y) * f,
+                             width=ab.width * f, height=ab.height * f)
+                hit = [g.id for g in scene.objects if g.kind == "plot" and g.id != oid
+                       and (gb := geo.axes_box(g.id)) is not None
+                       and moved.overlap_area(gb) > 0.01 and ab.overlap_area(gb) <= 0.01]
+                if hit:
+                    unresolved.append({**o, "summary": o["summary"] + f"; moving '{oid}' inside the "
+                                       f"frame would put its axes over {hit}: reduce its width/scale "
+                                       "or move the other plot"})
+                    continue
             obj.position = (round(x + dx, 3), round(y + dy, 3))
             obj.scale = new_scale
 
