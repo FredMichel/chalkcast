@@ -467,6 +467,52 @@ def unused_tweens(scene: Scene) -> list[int]:
 DEFAULT_VIEW = BBox(cx=0.0, cy=0.0, width=FRAME_WIDTH, height=FRAME_HEIGHT)
 
 
+def _still_steps(scene: Scene) -> list[dict[str, Any]]:
+    """Tweens and camera moves that change nothing on screen."""
+    out: list[dict[str, Any]] = []
+    unused = set(unused_tweens(scene))
+    states = timeline(scene)
+    steps = scene.steps
+    value = dict(scene.params)
+    cams = camera_by_step(scene)
+    for n, st in enumerate(steps):
+        if st.kind == "camera_move":
+            before, after = cams.get(st.index, (None, None))
+            if before is not None and before == after:
+                out.append(_obl(scene.id, "timing", "warning",
+                                f"the camera_move at step {st.index} does not change the view "
+                                "(zoom is absolute, and the focus is already there): nothing moves",
+                                "change its zoom or focus, or drop the step", step=st.index))
+        if st.kind != "tween" or st.param not in value or st.value is None:
+            continue
+        cur, value[st.param] = value[st.param], float(st.value)
+        if st.index in unused:
+            continue
+        if abs(cur - float(st.value)) < 1e-12:
+            out.append(_obl(scene.id, "timing", "warning",
+                            f"step {st.index} tweens '{st.param}' to {cur:g}, the value it already "
+                            "has: nothing moves", "tween to another value, or use a wait",
+                            step=st.index))
+            continue
+        # on screen during the beat (a with_previous write joins the same play)
+        end = n
+        while end + 1 < len(steps) and steps[end + 1].with_previous:
+            end += 1
+        start = n
+        while start > 0 and steps[start].with_previous:
+            start -= 1
+        on = set()
+        for k in range(max(start - 1, 0), end + 1):
+            on |= set(states[k].values())
+        if not any(st.param in obj_params(scene.get_obj(g), scene) for g in on):
+            out.append(_obl(scene.id, "timing", "warning",
+                            f"step {st.index} tweens '{st.param}' while nothing that uses it is on "
+                            "screen: the motion is not seen",
+                            "write the object(s) using it before the tween, or drop the step",
+                            step=st.index))
+    return out
+
+
 def camera_by_step(scene: Scene) -> dict[int, tuple[BBox, BBox]]:
     """Camera frame before and after each step. camera_move zoom is absolute; a
     move without focus keeps the centre."""
@@ -646,13 +692,17 @@ def _pulse_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
 def _cropped_at_end(scene: Scene, geo: Geometry, oid: str) -> float | None:
     """Overflow beyond the final camera view, if ``oid`` is on screen at the end
     under a camera that moved back out to frame size or wider. Ending zoomed in on a
-    detail is a choice; ending at zoom 1 but off-centre is the trap (zoom=1 keeps the
-    current centre, it does not restore the opening view)."""
+    detail is a choice (a plot cut by the view is fine), but a text or equation the
+    final view slices through is not; ending at zoom 1 but off-centre is the trap
+    (zoom=1 keeps the current centre, it does not restore the opening view)."""
     last = scene.steps[-1].index
     view = camera_by_step(scene)[last][1]
-    if (view == DEFAULT_VIEW or view.width < FRAME_WIDTH - 1e-6
-            or oid not in timeline(scene)[-1].values()):
+    if view == DEFAULT_VIEW or oid not in timeline(scene)[-1].values():
         return None
+    if view.width < FRAME_WIDTH - 1e-6:
+        box = geo.bbox(oid) if geo.measured else None
+        if scene.get_obj(oid).kind not in TEXTLIKE or box is None or box.overlap_area(view) <= 0:
+            return None  # zoomed in on a detail: what is left out is a choice
     if not geo.measured:  # estimated: only a centre outside the final view is certain
         cx, cy = scene.get_obj(oid).position
         o = overflow(BBox(cx=cx, cy=cy, width=0.0, height=0.0), view)
@@ -741,6 +791,15 @@ def _lane_framing(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                             f"object '{oid}' reaches {over + view_margin(best):.2f} units into the "
                             f"{view_margin(best):.2g}-unit safe margin (measured)",
                             "nudge it toward the center", target=oid))
+    if scene.steps and geo.measured:
+        view = camera_by_step(scene)[scene.steps[-1].index][1]
+        on = [g for g in dict.fromkeys(timeline(scene)[-1].values()) if geo.bbox(g)]
+        if view != DEFAULT_VIEW and on and not any(geo.bbox(g).overlap_area(view) > 0 for g in on):
+            out.append(_obl(scene.id, "framing", "warning",
+                            "the scene ends on a camera view with nothing in it (the last frame, "
+                            "where a GIF loops, is blank)",
+                            "aim the last camera_move at an object (focus_x/focus_y in scene "
+                            "units), or end with zoom=1, focus_x=0, focus_y=0"))
     return out + _pulse_framing(scene, geo)
 
 
@@ -752,6 +811,70 @@ def _chain_root(scene: Scene, oid: str) -> str:
         seen.add(oid)
         oid = src[oid]
     return oid
+
+
+def _layer(scene: Scene) -> dict[str, tuple[int, int]]:
+    """(step, place among its targets) each object is first drawn at: Manim draws
+    later additions on top. A transform's destination is drawn by its source."""
+    out: dict[str, tuple[int, int]] = {}
+    for st in scene.steps:
+        if st.kind == "write":
+            for k, t in enumerate(st.targets):
+                out.setdefault(t, (st.index, k))
+        elif st.kind == "transform" and st.to and st.targets and st.targets[0] in out:
+            out.setdefault(st.to, out[st.targets[0]])
+    return out
+
+
+def is_dot(obj: Obj | None) -> bool:
+    return obj is not None and obj.kind == "shape" and obj.payload.get("shape") == "dot"
+
+
+def _disc_cover(dot: BBox, box: BBox) -> float:
+    """Share of ``box`` inside the filled disc of a dot (9 x 5 grid)."""
+    r = min(dot.width, dot.height) / 2
+    pts = [(box.left + (i + 0.5) * box.width / 9, box.bottom + (j + 0.5) * box.height / 5)
+           for i in range(9) for j in range(5)]
+    return sum((x - dot.cx) ** 2 + (y - dot.cy) ** 2 <= r * r for x, y in pts) / len(pts)
+
+
+def _under_dot(scene: Scene, geo: Geometry, dot: Obj, other: Obj) -> tuple[str, str] | None:
+    """A filled dot drawn after a label, line or arrow hides what it covers."""
+    order = _layer(scene)
+    if order.get(dot.id, (0, 0)) <= order.get(other.id, (0, 0)):
+        return None  # the other is drawn on top of the dot
+    db = geo.bbox(dot.id)
+    if db is None:
+        return None
+    r = min(db.width, db.height) / 2
+    if other.kind in TEXTLIKE:
+        tb = geo.bbox(other.id)
+        if tb is not None and _disc_cover(db, tb) >= 0.25:
+            return ("error", f"'{other.id}' is hidden under the dot '{dot.id}' (the dot is drawn "
+                             "after it, measured)")
+        return None
+    pts = geo.ink(other.id)
+    if not pts:
+        return None
+    # a bond between two atoms: covered by the dots together (reported once, by the first)
+    later = [d for d in scene.objects if is_dot(d) and geo.bbox(d.id)
+             and order.get(d.id, (0, 0)) > order.get(other.id, (0, 0))]
+    discs = [(b.cx, b.cy, min(b.width, b.height) / 2 - 0.02) for b in (geo.bbox(d.id) for d in later)]
+    inside = [any((p[0] - x) ** 2 + (p[1] - y) ** 2 <= rr * rr for x, y, rr in discs) for p in pts]
+    if sum(inside) >= 0.6 * len(pts) and later and later[0].id == dot.id:
+        names = ", ".join(f"'{d.id}'" for d in later if any(
+            (p[0] - geo.bbox(d.id).cx) ** 2 + (p[1] - geo.bbox(d.id).cy) ** 2
+            <= (min(geo.bbox(d.id).width, geo.bbox(d.id).height) / 2) ** 2 for p in pts))
+        return ("warning", f"'{other.id}' is hidden under the dot(s) {names} (drawn after it, "
+                           "measured)")
+    if sum(inside) >= 0.6 * len(pts):
+        return None
+    p = other.payload
+    if p.get("shape") == "arrow" and "x2" in p and \
+            (float(p["x2"]) - db.cx) ** 2 + (float(p["y2"]) - db.cy) ** 2 <= r * r:
+        return ("warning", f"the tip of '{other.id}' is hidden under the dot '{dot.id}' (the dot "
+                           "is drawn after it, measured)")
+    return None
 
 
 def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
@@ -801,6 +924,14 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if ratio >= MEASURED_TEXT_OVERLAP:
             return ("error", f"'{a.id}' and '{b.id}' overlap (~{ratio * 100:.0f}% of the smaller, measured)")
         return None
+    if (is_dot(a) or is_dot(b)) and not static_only:
+        dot, other = (a, b) if is_dot(a) else (b, a)
+        if other.kind in TEXTLIKE + ("shape",) and not is_dot(other):
+            if (hidden := _under_dot(scene, geo, dot, other)):
+                return hidden
+            db, tb = geo.bbox(dot.id), geo.bbox(other.id)
+            if other.kind in TEXTLIKE and db and tb and _disc_cover(db, tb) >= 0.9:
+                return None  # a label on its node: read against the dot (legibility lane)
     if ka in TEXTLIKE or kb in TEXTLIKE:
         txt, other = (a, b) if ka in TEXTLIKE else (b, a)
         tbox = geo.bbox(txt.id)
@@ -1265,6 +1396,30 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
                                 "move the text off the fill, give it a color that contrasts with "
                                 f"{f.color or 'the fill'}, or lower the fill's opacity",
                                 target=t.id, other=f.id))
+    # a label written on a filled dot (a node) is read against the dot
+    order = _layer(scene)
+    for d in scene.objects:
+        db = geo.bbox(d.id) if is_dot(d) else None
+        if db is None:
+            continue
+        d0, d1 = _shown_span(scene, d.id)
+        for t in scene.objects:
+            tb = geo.bbox(t.id) if t.kind in TEXTLIKE else None
+            if tb is None or order.get(t.id, (0, 0)) < order.get(d.id, (0, 0)):
+                continue
+            t0, t1 = _shown_span(scene, t.id)
+            if max(d0, t0) >= min(d1, t1) or _disc_cover(db, tb) < 0.9:
+                continue
+            if d0 <= t0 and t1 <= d1:
+                on_fill.add(t.id)
+            col, under = t.color or ink, d.color or ink
+            c = contrast(col, under)
+            if c is not None and c < MIN_TEXT_CONTRAST:
+                out.append(_obl(scene.id, "legibility", "warning",
+                                f"'{t.id}' ({col}) is written on the dot '{d.id}' ({under}), where "
+                                f"it has a contrast of {c:.2f}:1 (measured)",
+                                "give the label or the dot a contrasting color, or move the label "
+                                "beside the dot", target=t.id, other=d.id))
     return out, on_fill
 
 
@@ -1362,6 +1517,11 @@ def _lane_legibility(scene: Scene, geo: Geometry, theme_name: str = DEFAULT_THEM
                                 f"tick numbers of '{obj.id}' render at ~{fs:.0f}pt (below "
                                 f"{MIN_FONT_SIZE:.0f}pt)", "increase the plot's scale or drop "
                                 "show_numbers", target=obj.id))
+    for o in out:  # a size made small by a zoom-out: name the zoom, the object may be fine
+        z = zoom.get(o.get("target") or "", 1.0)
+        if z < 1.0 and ("pt" in o["summary"] and ("render" in o["summary"] or "small" in o["summary"])):
+            o["summary"] += f" while the camera is zoomed out (zoom {z:g})"
+            o["suggested_fix"] += ", or zoom out less (camera_move zoom closer to 1)"
     return out
 
 
@@ -1460,6 +1620,7 @@ def _lane_timing(scene: Scene) -> list[dict[str, Any]]:
                         f"step {idx} tweens '{scene.steps[idx - 1].param}', which no object uses: "
                         "nothing moves", "use the parameter in an expression or anchor, or drop "
                         "the step", step=idx))
+    out += _still_steps(scene)
     # Areas, Riemann sums and anchored shapes are drawn from their plot's axes but
     # are separate objects: fading (or never writing) the plot leaves them floating.
     floating: set[str] = set()
@@ -1633,7 +1794,9 @@ def inspect_scene(scene: Scene, render_report: dict[str, Any] | None = None,
     else:
         limitations = ["bounding boxes are estimated from the scene graph, not measured; "
                        "framing/collision are approximate and capped at warnings",
-                       "fidelity lane and curve clipping need Manim (geometry probe) and were skipped",
+                       "geometry was not measured (Manim is missing, or the geometry probe "
+                       "failed: see any compile/LaTeX error), so the fidelity lane and curve "
+                       "clipping were skipped",
                        "shapes anchored to a plot are not placed in estimated geometry",
                        "intent lane (vision) is not available yet"]
 

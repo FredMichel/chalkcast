@@ -103,6 +103,8 @@ def validate(expr: str, params: Iterable[str] = ()) -> None:
         try:
             with np.errstate(all="ignore"):
                 y = fn(xv, **sample_params)
+            if np.iscomplexobj(y):
+                continue  # x**0.5 at x < 0: outside the domain, like sqrt there
             float(np.asarray(y, dtype=float).reshape(-1)[0])
             ok_points += 1
         except (ZeroDivisionError, ValueError, OverflowError, FloatingPointError):

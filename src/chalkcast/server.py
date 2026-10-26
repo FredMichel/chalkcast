@@ -137,6 +137,17 @@ def _tex_specials(tex: str) -> str | None:
             return (f"unescaped '{ch}' in LaTeX: write \\{ch} for {name} ('{ch}' alone "
                     + ("starts a comment that swallows the rest of the line)" if ch == "%"
                        else "is a macro parameter)"))
+    depth = 0
+    for m in re.finditer(r"(?<!\\)[{}]", tex):
+        depth += 1 if m.group() == "{" else -1
+        if depth < 0:
+            return "unbalanced braces in LaTeX: a '}' closes nothing (write \\} for a literal brace)"
+    if depth:
+        return (f"unbalanced braces in LaTeX: {depth} '{{' never closed (e.g. \\frac{{a}}{{b}} needs "
+                "both groups closed)")
+    if re.search(r"\\begin\{(align|equation|eqnarray)\*?\}", tex):
+        return ("equations are already set in an align* environment: drop \\begin{...}/\\end{...} "
+                "and use & and \\\\ directly for aligned lines")
     return None
 
 
@@ -883,6 +894,10 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
     if not changed and x is None and y is None and scale is None and color is None and not reset_color:
         return err("nothing to change; pass at least one field")
     # all checks passed: commit
+    def rect(o: Obj, payload: dict[str, Any]) -> tuple[float, float, float, float]:
+        return (o.position[0], o.position[1], o.scale * float(payload.get("width", 8.0)) / 2,
+                o.scale * float(payload.get("height", 5.0)) / 2)
+    old_rect = rect(obj, obj.payload)
     obj.payload = p
     if x is not None or y is not None:
         ox, oy = obj.position
@@ -906,11 +921,10 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         changed.append("color")
     if obj.kind == "plot" and set(changed) & {"x_range", "y_range", "width", "height", "position",
                                                 "scale"}:
-        cx, cy = obj.position
-        w = obj.scale * float(obj.payload.get("width", 8.0)) / 2
-        h = obj.scale * float(obj.payload.get("height", 5.0)) / 2
+        # what was placed over the plot (its old place) or is now under it (its new one)
         def over(px: float, py: float) -> bool:
-            return abs(px - cx) <= w + 0.5 and abs(py - cy) <= h + 0.5
+            return any(abs(px - cx) <= w + 0.5 and abs(py - cy) <= h + 0.5
+                       for cx, cy, w, h in (old_rect, rect(obj, obj.payload)))
         near = [o.id for o in scene.objects if o.kind in ("text", "equation", "shape")
                 and not o.payload.get("anchor")
                 and (any(over(o.payload["x1" if i == 0 else "x2"], o.payload["y1" if i == 0 else "y2"])
@@ -1070,6 +1084,11 @@ def fix_scene(scene_id: str | None = None, max_rounds: int = 3,
             break
     obls = _register_obligations(project, scene.id, insp["obligations"])
     remaining = [o for o in obls if o["severity"] in ("error", "warning")]
+    for o in remaining:  # still open after fix_scene ran: it could not, whatever the hint said
+        fx = o.get("suggested_fix") or ""
+        if "fix_scene can do this" in fx:
+            o["suggested_fix"] = fx.replace("fix_scene can do this",
+                                            "fix_scene tried and could not: do it yourself")
     # why the fixer left something alone, when it says more than the finding itself
     known = {o["summary"] for o in insp["obligations"]}
     why = [u["summary"] for u in unresolved if u["summary"] not in known]

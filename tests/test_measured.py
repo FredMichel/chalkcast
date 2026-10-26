@@ -53,7 +53,7 @@ def test_real_false_positive_is_gone():
 def test_compile_errors_caught_without_rendering():
     srv.open_project()
     srv.add_scene()
-    eq = srv.add_equation(r"\frac{1}{2")["result"]["object_id"]
+    eq = srv.add_equation(r"\frac{1}{2} \notamacro")["result"]["object_id"]
     srv.add_step("write", targets=[eq])
     r = srv.render_scene()
     assert r["ok"] is False and "render skipped" in r["error"]

@@ -22,7 +22,7 @@ from .themes import theme
 
 _KNOWN_COLORS = {
     "WHITE", "BLACK", "RED", "GREEN", "BLUE", "YELLOW", "ORANGE", "PURPLE",
-    "PINK", "TEAL", "GRAY", "GREY", "GOLD", "MAROON", "LIGHT_GRAY", "DARK_GRAY",
+    "PINK", "TEAL", "GRAY", "GREY", "GOLD", "MAROON", "LIGHT_GRAY", "DARK_GRAY", "LIGHT_GREY", "DARK_GREY",
     "BLUE_A", "BLUE_B", "BLUE_C", "BLUE_D", "BLUE_E", "GREEN_A", "GREEN_E",
     "RED_A", "RED_E", "YELLOW_A", "YELLOW_E",
 }
@@ -171,7 +171,7 @@ def _cc_helper_graph(ax, f, a, b):
 # default colour of the i-th curve of a plot, so two curves are never identical
 _COLOR_HEX = {  # Manim CE values of the names above
     'BLACK': '#000000', 'BLUE': '#58c4dd', 'BLUE_A': '#c7e9f1', 'BLUE_B': '#9cdceb',
-    'BLUE_C': '#58c4dd', 'BLUE_D': '#29abca', 'BLUE_E': '#236b8e', 'DARK_GRAY': '#444444',
+    'BLUE_C': '#58c4dd', 'BLUE_D': '#29abca', 'BLUE_E': '#236b8e', 'DARK_GRAY': '#444444', 'DARK_GREY': '#444444', 'LIGHT_GREY': '#bbbbbb',
     'GOLD': '#f0ac5f', 'GRAY': '#888888', 'GREEN': '#83c167', 'GREEN_A': '#c9e2ae',
     'GREEN_E': '#699c52', 'GREY': '#888888', 'LIGHT_GRAY': '#bbbbbb', 'MAROON': '#c55f73',
     'ORANGE': '#ff862f', 'PINK': '#d147bd', 'PURPLE': '#9a72ac', 'RED': '#fc6255',

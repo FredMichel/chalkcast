@@ -2339,3 +2339,145 @@ def test_text_partly_off_fill_checked_on_background(scene, fade):
         srv.add_step("wait", duration=1)
     r = _measured(scene)
     assert any(o.get("target") == t and "nearly invisible" in o["summary"] for o in r["obligations"])
+
+
+# ---- twenty-ninth audit ----------------------------------------------------------
+
+# AD1. fractional powers are accepted (x < 0 gives a complex: outside the domain, like sqrt)
+@pytest.mark.parametrize("expr", ["x**0.5", "x**1.5", "x**(3/2)", "x**(2/3)"])
+def test_fractional_powers_accepted(scene, expr):
+    assert srv.add_plot(functions=[{"expr": expr}], x_range=[0, 4], y_range=[0, 8])["ok"]
+
+
+def test_fractional_power_renders(scene):
+    p = _id(srv.add_plot(functions=[{"expr": "x**1.5"}], x_range=[0, 4], y_range=[0, 8]))
+    srv.add_step("write", targets=[p])
+    r = _measured(scene)
+    assert r["verdict"]["status"] == "pass"
+
+
+# AD2. a scene ending on an empty view, or on a view slicing a text, is flagged
+def test_end_on_empty_view(scene):
+    p = _id(srv.add_plot(functions=["sin(x)"], x=-3, width=6, height=4))
+    srv.add_step("write", targets=[p])
+    srv.add_step("camera_move", zoom=2.5, focus_x=3, focus_y=0)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any("nothing in it" in o["summary"] for o in r["obligations"])
+
+
+def test_end_view_slicing_text(scene):
+    t = _id(srv.add_text("Energy is conserved here", y=2.1, font_size=48))
+    e = _id(srv.add_equation(r"E = \frac{1}{2}mv^2 + mgh", y=-0.5))
+    srv.add_step("write", targets=[t, e])
+    srv.add_step("camera_move", zoom=1.5, focus_x=1.5, focus_y=-0.5)
+    r = _measured(scene)
+    assert any(o.get("target") == t and "final view" in o["summary"] for o in r["obligations"])
+    assert not any(o.get("target") == e and "final view" in o["summary"] for o in r["obligations"])
+
+
+# AD3. a line or arrow drawn before a dot is reported when the dot hides it
+def test_line_hidden_under_dots(scene):
+    ln = _id(srv.add_shape("line", x1=-0.25, y1=0, x2=0.25, y2=0))
+    d1 = _id(srv.add_shape("dot", x=-0.25, y=0, size=3))
+    d2 = _id(srv.add_shape("dot", x=0.25, y=0, size=3))
+    srv.add_step("write", targets=[ln])
+    srv.add_step("write", targets=[d1, d2])
+    r = _measured(scene)
+    assert any(ln in (o.get("target"), o.get("other")) and "hidden under the dot(s)" in o["summary"]
+               for o in r["obligations"])
+
+
+def test_arrow_tip_hidden_under_dot(scene):
+    a = _id(srv.add_shape("arrow", x1=-3, y1=0, x2=0, y2=0))
+    d = _id(srv.add_shape("dot", x=0, y=0, size=5))
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    assert any("tip of" in o["summary"] and "hidden under the dot" in o["summary"] for o in r["obligations"])
+    # drawn after the dot, the tip is on top: nothing to say
+    scene.steps.clear()
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[a])
+    r = _measured(scene)
+    assert not any("hidden under" in o["summary"] for o in r["obligations"])
+
+
+# AD4. a text under a later dot is hidden; a label on its node is judged against the dot
+def test_text_and_dots(scene):
+    t = _id(srv.add_text("m", font_size=30))
+    d = _id(srv.add_shape("dot", size=5, color="BLUE"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    assert any(o.get("target") == t or o.get("other") == t for o in r["obligations"]
+               if "hidden under the dot" in o["summary"])
+    srv.update_object(t, color="BLACK")
+    srv.update_object(d, color="YELLOW")
+    scene.steps.clear()
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[t])
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if t in (o.get("target"), o.get("other"))]
+
+
+# AD5. moving a plot far still names the hand-placed objects it leaves behind
+@pytest.mark.parametrize("kw", [{"x": -2}, {"scale": 0.6}])
+def test_left_behind_after_a_big_move(scene, kw):
+    p = _id(srv.add_plot(functions=["x**2/5"], x_range=[-3, 3], y_range=[0, 2]))
+    ln = _id(srv.add_shape("line", x1=2.667, y1=-2.5, x2=2.667, y2=-0.5))
+    t = _id(srv.add_text("f(2)", x=3.3, y=-0.5))
+    r = srv.update_object(p, **kw)
+    note = " ".join(r["limitations"] + r["result"].get("notes", []))
+    assert ln in note and t in note
+
+
+# AD6. tweens and camera moves that change nothing are reported
+def test_still_steps(scene):
+    srv.add_parameter("k", 1)
+    p = _id(srv.add_plot(functions=["sin(k*x)"]))
+    srv.add_step("tween", param="k", value=2, duration=1)  # before the plot is written
+    srv.add_step("write", targets=[p])
+    srv.add_step("tween", param="k", value=2, duration=1)  # to its current value
+    srv.add_step("camera_move", zoom=1)                     # already there
+    srv.add_step("fade", targets=[p])
+    srv.add_step("tween", param="k", value=3, duration=1)  # nothing using it on screen
+    sums = [o["summary"] for o in _lanes(scene, "warning")]
+    assert sum("is not seen" in s for s in sums) == 2
+    assert any("the value it already has" in s for s in sums)
+    assert any("does not change the view" in s for s in sums)
+
+
+# AD7. LaTeX braces and nested environments are checked when the equation is set
+@pytest.mark.parametrize("tex,msg", [(r"F = \frac{G m_1 m_2}{r^2", "never closed"), ("a}", "closes nothing"),
+                                     (r"\begin{align} a &= b \end{align}", "align*")])
+def test_latex_braces_checked_early(scene, tex, msg):
+    r = srv.add_equation(tex)
+    assert r["ok"] is False and msg in r["error"]
+    e = _id(srv.add_equation("a = b"))
+    r = srv.update_object(e, tex=tex)
+    assert r["ok"] is False and msg in r["error"]
+
+
+# AD8. after fix_scene gives up, the hint no longer claims it can fix the finding
+def test_fix_scene_hint_after_giving_up(scene):
+    pytest.importorskip("manim")
+    p = _id(srv.add_plot(functions=[{"expr": "sin(1/x)"}], x_range=[-1, 1], y_range=[-2, 2]))
+    srv.add_step("write", targets=[p])
+    r = srv.fix_scene()["result"]
+    assert not any("fix_scene can do this" in (o.get("suggested_fix") or "") for o in r["needs_author"])
+
+
+# AD9. a size warning caused by a zoom-out names the zoom
+def test_zoom_out_named_in_size_warning(scene):
+    p = _id(srv.add_plot(functions=["x"], show_numbers=True))
+    srv.add_step("write", targets=[p])
+    srv.add_step("camera_move", zoom=0.4)
+    w = [o for o in _lanes(scene, "warning") if "tick numbers" in o["summary"] and "pt" in o["summary"]]
+    assert w and "zoomed out" in w[0]["summary"] and "zoom out less" in w[0]["suggested_fix"]
+
+
+# AD10. both spellings of grey are accepted
+@pytest.mark.parametrize("c", ["DARK_GREY", "LIGHT_GREY", "DARK_GRAY"])
+def test_grey_spellings(scene, c):
+    assert srv.add_text("x", color=c)["ok"]
