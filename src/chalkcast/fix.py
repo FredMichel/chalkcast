@@ -260,6 +260,10 @@ def apply_fixes(scene: Scene, obligations: list[dict[str, Any]],
                             "scale": obj.scale, "reason": o["summary"],
                             **({"to_scene": plot_to_scene(obj)} if obj.kind == "plot" else {})})
 
+        elif lane == "collision" and geo.measured and "hidden under the dot" in o["summary"]:
+            # a draw-order problem (a label meant to sit on its node): moving it is wrong
+            unresolved.append({**o, "summary": o["summary"] + ": a draw-order problem, which "
+                               "fix_scene does not change; write it after the dot"})
         elif lane == "collision" and geo.measured:
             # move the label (the text-like side) to the nearest free spot
             cand = [c for c in (oid, o.get("other")) if c and scene.get_obj(c)

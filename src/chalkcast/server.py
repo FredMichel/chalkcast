@@ -137,9 +137,14 @@ def _tex_specials(tex: str) -> str | None:
             return (f"unescaped '{ch}' in LaTeX: write \\{ch} for {name} ('{ch}' alone "
                     + ("starts a comment that swallows the rest of the line)" if ch == "%"
                        else "is a macro parameter)"))
-    depth = 0
-    for m in re.finditer(r"(?<!\\)[{}]", tex):
-        depth += 1 if m.group() == "{" else -1
+    depth, i = 0, 0
+    while i < len(tex):  # \{ is a literal brace, but \\{ is a line break then a group
+        c = tex[i]
+        if c == "\\":
+            i += 2
+            continue
+        depth += {"{": 1, "}": -1}.get(c, 0)
+        i += 1
         if depth < 0:
             return "unbalanced braces in LaTeX: a '}' closes nothing (write \\} for a literal brace)"
     if depth:
@@ -149,6 +154,31 @@ def _tex_specials(tex: str) -> str | None:
         return ("equations are already set in an align* environment: drop \\begin{...}/\\end{...} "
                 "and use & and \\\\ directly for aligned lines")
     return None
+
+
+def _complex_notes(funcs: list[Any], x_range: list[float], params: dict[str, float]) -> list[str]:
+    """A fractional power of a negative number is complex in Python: that part of
+    the curve is not drawn. Say so (the real cube root is np.cbrt / cbrt)."""
+    out = []
+    lo, hi = float(x_range[0]), float(x_range[1])
+    xs = [lo + (hi - lo) * (k + 0.5) / 24 for k in range(24)]
+    for i, f in enumerate(funcs, 1):
+        expr = str(f.get("expr", "x") if isinstance(f, dict) else f)
+        if "**" not in expr:
+            continue
+        fn = compile_fn(expr, params)
+        bad = []
+        for xv in xs:
+            try:
+                if isinstance(fn(xv, **params), complex):
+                    bad.append(xv)
+            except Exception:  # noqa: BLE001 - poles are another matter
+                continue
+        if bad:
+            out.append(f"function {i} ('{expr}') is not real for x in about [{min(bad):.3g}, "
+                       f"{max(bad):.3g}] (a fractional power of a negative number): that part is "
+                       "not drawn. For the real cube root write cbrt(x); for |x|^p write abs(x)**p")
+    return out
 
 
 def _unknown_object(object_id: str, scene: Scene, project: Project) -> str:
@@ -442,11 +472,11 @@ def add_plot(functions: list[dict[str, Any]] | None = None,
     if show_numbers:
         payload["show_numbers"] = True
     scene.objects.append(Obj(id=oid, kind="plot", position=(x, y), payload=payload))
+    notes = ["no tick or number at x_max / y_max: the axis tips sit there"] if show_numbers else []
+    notes += _complex_notes(funcs, payload["x_range"], scene.params)
     return ok({"scene_id": scene.id, "object_id": oid, "functions": len(funcs),
                "x_range": payload["x_range"], "y_range": payload["y_range"],
-               "to_scene": _to_scene(scene.objects[-1])}, untrusted=["expr"],
-              limitations=["no tick or number at x_max / y_max: the axis tips sit there"]
-              if show_numbers else [])
+               "to_scene": _to_scene(scene.objects[-1])}, untrusted=["expr"], limitations=notes)
 
 
 @mcp.tool()
@@ -921,17 +951,26 @@ def update_object(object_id: str, x: float | None = None, y: float | None = None
         changed.append("color")
     if obj.kind == "plot" and set(changed) & {"x_range", "y_range", "width", "height", "position",
                                                 "scale"}:
-        # what was placed over the plot (its old place) or is now under it (its new one)
-        def over(px: float, py: float) -> bool:
-            return any(abs(px - cx) <= w + 0.5 and abs(py - cy) <= h + 0.5
-                       for cx, cy, w, h in (old_rect, rect(obj, obj.payload)))
-        near = [o.id for o in scene.objects if o.kind in ("text", "equation", "shape")
-                and not o.payload.get("anchor")
-                and (any(over(o.payload["x1" if i == 0 else "x2"], o.payload["y1" if i == 0 else "y2"])
-                         for i in (0, 1)) if "x2" in o.payload else over(*o.position))]
-        if near:
-            notes.append(f"{near} are placed in scene coordinates over this plot and did not "
+        # what was placed over the plot is left behind; what it now covers may collide
+        def over(px: float, py: float, r: tuple[float, float, float, float]) -> bool:
+            cx, cy, w, h = r
+            return abs(px - cx) <= w + 0.5 and abs(py - cy) <= h + 0.5
+
+        def placed_over(o: Obj, r: tuple[float, float, float, float]) -> bool:
+            if "x2" in o.payload:
+                return any(over(o.payload[f"x{i}"], o.payload[f"y{i}"], r) for i in (1, 2))
+            return over(*o.position, r)
+        new_rect = rect(obj, obj.payload)
+        hand = [o for o in scene.objects if o.kind in ("text", "equation", "shape")
+                and not o.payload.get("anchor")]
+        behind = [o.id for o in hand if placed_over(o, old_rect)]
+        covered = [o.id for o in hand if placed_over(o, new_rect) and o.id not in behind]
+        if behind:
+            notes.append(f"{behind} are placed in scene coordinates over this plot and did not "
                          "move with its curves: re-place them (see to_scene)")
+        if covered:
+            notes.append(f"the plot now lies over {covered}: check they do not collide with it "
+                         "(inspect_render)")
         changed_map = _to_scene(obj)
     else:
         changed_map = None

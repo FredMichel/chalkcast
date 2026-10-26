@@ -2481,3 +2481,118 @@ def test_zoom_out_named_in_size_warning(scene):
 @pytest.mark.parametrize("c", ["DARK_GREY", "LIGHT_GREY", "DARK_GRAY"])
 def test_grey_spellings(scene, c):
     assert srv.add_text("x", color=c)["ok"]
+
+
+# ---- thirtieth audit -------------------------------------------------------------
+
+def _node_graph():
+    ln = _id(srv.add_shape("line", x1=-2, y1=0, x2=2, y2=0))
+    d = _id(srv.add_shape("dot", x=2, y=0, size=4, color="YELLOW"))
+    t = _id(srv.add_text("B", x=2, y=0, font_size=28, color="BLACK"))
+    return ln, d, t
+
+
+# AE1. an edge ending under a node does not "cross" the node's label, and fix_scene leaves it
+def test_edge_under_node_label(scene):
+    ln, d, t = _node_graph()
+    srv.add_step("write", targets=[ln])
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[t])
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if t in (o.get("target"), o.get("other"))]
+    srv.fix_scene()
+    assert scene.get_obj(t).position == (2, 0)
+
+
+# AE2. draw order follows the latest write (a fade then re-write puts it back on top)
+def test_layer_follows_rewrites(scene):
+    t = _id(srv.add_text("A"))
+    d = _id(srv.add_shape("dot", size=5, color="BLUE"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("fade", targets=[t])
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[t])
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert not any("hidden under" in o["summary"] for o in r["obligations"])
+    scene.steps.clear()
+    srv.update_object(d, color="YELLOW")
+    srv.update_object(t, color="BLACK")
+    srv.add_step("write", targets=[d])
+    srv.add_step("write", targets=[t])
+    srv.add_step("fade", targets=[d])
+    srv.add_step("write", targets=[d])
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert any(o.get("target") == t and "hidden under the dot" in o["summary"] for o in r["obligations"])
+
+
+# AE3. a node recoloured by a transform keeps its label "on the node"
+def test_label_on_recoloured_node(scene):
+    ln, d, t = _node_graph()
+    d2 = _id(srv.add_shape("dot", x=2, y=0, size=4, color="RED"))
+    srv.add_step("write", targets=[ln, d])
+    srv.add_step("write", targets=[t])
+    srv.add_step("transform", targets=[d], to=d2)
+    srv.add_step("wait", duration=1)
+    r = _measured(scene)
+    assert not [o for o in r["obligations"] if t in (o.get("target"), o.get("other"))]
+
+
+# AE4. an arrow whose apex only touches a small dot keeps a visible tip
+def test_arrow_apex_touching_small_dot(scene):
+    a = _id(srv.add_shape("arrow", x1=-3, y1=-1, x2=0, y2=0, color="RED"))
+    d = _id(srv.add_shape("dot", x=0, y=0))
+    srv.add_step("write", targets=[a])
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    assert not any("hidden under" in o["summary"] for o in r["obligations"])
+
+
+# AE5. a fractional power that drops part of the range says so; cbrt is accepted bare
+def test_cube_root_note(scene):
+    r = srv.add_plot(functions=["x**(1/3)"], x_range=[-8, 8], y_range=[-3, 3])
+    assert any("not real" in n and "cbrt" in n for n in r["limitations"])
+    assert srv.add_plot(functions=["cbrt(x)"], x_range=[-8, 8], y_range=[-3, 3])["ok"]
+    assert not srv.add_plot(functions=["x**0.5"], x_range=[0, 4], y_range=[0, 3])["limitations"]
+
+
+# AE6. a line break followed by a brace group is not an unbalanced brace
+@pytest.mark.parametrize("tex", [r"\begin{cases} 1 & x>0 \\{-1} & x\le 0\end{cases}", r"a \\{b}"])
+def test_line_break_then_group(scene, tex):
+    assert srv.add_equation(tex)["ok"]
+
+
+# AE7. occlusion findings point at draw order, and fix_scene does not move the label
+def test_occlusion_fix_is_draw_order(scene):
+    t = _id(srv.add_text("m", font_size=30))
+    d = _id(srv.add_shape("dot", size=5, color="YELLOW"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("write", targets=[d])
+    r = _measured(scene)
+    o = next(o for o in r["obligations"] if "hidden under the dot" in o["summary"])
+    assert "draw order" in o["suggested_fix"]
+    f = srv.fix_scene()["result"]
+    assert scene.get_obj(t).position == (0, 0)
+    assert any("draw-order problem" in s for s in f["not_auto_fixable"])
+
+
+# AE8. moving a plot onto an object is not called "left behind"
+def test_plot_moved_onto_object(scene):
+    p = _id(srv.add_plot(functions=["x"], x=-3, width=6, height=4))
+    e = _id(srv.add_equation("E = mc^2", x=3.5, y=0))
+    r = srv.update_object(p, x=2)
+    notes = " ".join(r["limitations"])
+    assert "did not move with its curves" not in notes and f"now lies over ['{e}']" in notes
+
+
+# AE9. a tween whose only user is never shown is reported once
+def test_still_tween_reported_once(scene):
+    srv.add_parameter("k", 1)
+    p = _id(srv.add_plot(functions=["sin(k*x)"]))
+    t = _id(srv.add_text("hello"))
+    srv.add_step("write", targets=[t])
+    srv.add_step("tween", param="k", value=2)
+    sums = [o["summary"] for o in _lanes(scene, "warning")]
+    assert any(f"'{p}' is never shown" in s for s in sums)
+    assert not any("is not seen" in s for s in sums)

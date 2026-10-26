@@ -34,7 +34,7 @@ import numpy as np
 # make common math usable bare in plot expressions, e.g. add_plot(expr='sin(x)')
 from numpy import (sin, cos, tan, exp, sqrt, log, log10, log2, sinh, cosh,
                    tanh, arcsin, arccos, arctan, arctan2, floor, ceil, sign,
-                   heaviside, where, minimum, maximum, clip, pi, e)
+                   heaviside, where, minimum, maximum, clip, pi, e, cbrt)
 from numpy import abs as _np_abs
 abs = _np_abs
 

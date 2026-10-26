@@ -504,6 +504,10 @@ def _still_steps(scene: Scene) -> list[dict[str, Any]]:
         on = set()
         for k in range(max(start - 1, 0), end + 1):
             on |= set(states[k].values())
+        ever = {g for s_ in states for g in s_.values()}
+        users = {o.id for o in scene.objects if st.param in obj_params(o, scene)}
+        if not (users & ever):
+            continue  # its users are never shown at all: that warning names this tween
         if not any(st.param in obj_params(scene.get_obj(g), scene) for g in on):
             out.append(_obl(scene.id, "timing", "warning",
                             f"step {st.index} tweens '{st.param}' while nothing that uses it is on "
@@ -814,15 +818,16 @@ def _chain_root(scene: Scene, oid: str) -> str:
 
 
 def _layer(scene: Scene) -> dict[str, tuple[int, int]]:
-    """(step, place among its targets) each object is first drawn at: Manim draws
-    later additions on top. A transform's destination is drawn by its source."""
+    """(step, place among its targets) each object was last drawn at: Manim draws
+    later additions on top, and a write (also a re-write after a fade) adds the
+    object again. A transform's destination is drawn by its source."""
     out: dict[str, tuple[int, int]] = {}
     for st in scene.steps:
         if st.kind == "write":
             for k, t in enumerate(st.targets):
-                out.setdefault(t, (st.index, k))
+                out[t] = (st.index, k)
         elif st.kind == "transform" and st.to and st.targets and st.targets[0] in out:
-            out.setdefault(st.to, out[st.targets[0]])
+            out[st.to] = out[st.targets[0]]
     return out
 
 
@@ -836,6 +841,31 @@ def _disc_cover(dot: BBox, box: BBox) -> float:
     pts = [(box.left + (i + 0.5) * box.width / 9, box.bottom + (j + 0.5) * box.height / 5)
            for i in range(9) for j in range(5)]
     return sum((x - dot.cx) ** 2 + (y - dot.cy) ** 2 <= r * r for x, y in pts) / len(pts)
+
+
+def _tip_cover(p: dict[str, Any], db: BBox) -> float:
+    """Share of an explicit arrow's tip (Manim: 0.35 long, at most a quarter of the
+    arrow) inside a dot's disc: an apex just touching the dot leaves the tip visible."""
+    x1, y1, x2, y2 = (float(p[k]) for k in ("x1", "y1", "x2", "y2"))
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 1e-9:
+        return 0.0
+    tip = min(0.35, 0.25 * length)
+    r = min(db.width, db.height) / 2
+    pts = [(x2 - (x2 - x1) * tip * k / 10 / length, y2 - (y2 - y1) * tip * k / 10 / length) for k in range(11)]
+    return sum((x - db.cx) ** 2 + (y - db.cy) ** 2 <= r * r for x, y in pts) / len(pts)
+
+
+def under_later_dots(scene: Scene, geo: Geometry, oid: str,
+                     pts: list[list[float]]) -> list[list[float]]:
+    """The points of ``oid``'s ink not covered by a filled dot drawn after it."""
+    order = _layer(scene)
+    discs = [(b.cx, b.cy, min(b.width, b.height) / 2) for d in scene.objects
+             if is_dot(d) and d.id != oid and order.get(d.id, (0, 0)) > order.get(oid, (0, 0))
+             and (b := geo.bbox(d.id))]
+    if not discs:
+        return pts
+    return [p for p in pts if not any((p[0] - x) ** 2 + (p[1] - y) ** 2 <= r * r for x, y, r in discs)]
 
 
 def _under_dot(scene: Scene, geo: Geometry, dot: Obj, other: Obj) -> tuple[str, str] | None:
@@ -870,8 +900,7 @@ def _under_dot(scene: Scene, geo: Geometry, dot: Obj, other: Obj) -> tuple[str, 
     if sum(inside) >= 0.6 * len(pts):
         return None
     p = other.payload
-    if p.get("shape") == "arrow" and "x2" in p and \
-            (float(p["x2"]) - db.cx) ** 2 + (float(p["y2"]) - db.cy) ** 2 <= r * r:
+    if p.get("shape") == "arrow" and "x2" in p and _tip_cover(p, db) >= 0.5:
         return ("warning", f"the tip of '{other.id}' is hidden under the dot '{dot.id}' (the dot "
                            "is drawn after it, measured)")
     return None
@@ -963,7 +992,7 @@ def _pair_finding(scene: Scene, geo: Geometry, a: Obj, b: Obj,
         if static_only and other.kind != "plot":
             return None
         pts = (geo.axes_points(other.id) if static_only else geo.curve_points(other.id)) \
-            if other.kind == "plot" else geo.ink(other.id)
+            if other.kind == "plot" else under_later_dots(scene, geo, other.id, geo.ink(other.id))
         # a shape against the glyphs themselves (a label's box has empty corners)
         boxes = (geo.glyph_boxes(txt.id) or [tbox]) if other.kind == "shape" else [tbox]
         hits = sum(1 for p in pts if any(_inside(p, g) for g in boxes))
@@ -1038,7 +1067,11 @@ def _lane_collision(scene: Scene, geo: Geometry) -> list[dict[str, Any]]:
                 tgt, oth = a.id, b.id
             elif b.kind in TEXTLIKE and a.kind not in TEXTLIKE:
                 tgt, oth = b.id, a.id
+            hidden = "hidden under the dot" in summary
             out.append(_obl(scene.id, "collision", sev, summary,
+                            ("draw order: write the dot first and this after it (or list it "
+                             "after the dot in the same step's targets); a line or arrow can "
+                             "also end at the dot's edge") if hidden else
                             "move one of them, or stagger their steps so they are not "
                             "visible together", target=tgt, other=oth))
     # moving curves/shapes: check every measured moment of every tween against what
@@ -1367,6 +1400,7 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
     fill for as long as they are shown (only those skip the background check)."""
     out: list[dict[str, Any]] = []
     on_fill: set[str] = set()
+    spans: dict[str, list[tuple[float, float]]] = {}  # text -> when a fill/dot lies under all of it
     if not geo.measured:
         return out, on_fill
     for f in scene.objects:
@@ -1385,8 +1419,8 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
             cover = geo.fill_cover(f.id, tb) or 0
             if cover < 0.25:
                 continue
-            if cover >= 0.9 and f0 <= t0 and t1 <= f1:
-                on_fill.add(t.id)  # all of it, all the time: the background never shows behind it
+            if cover >= 0.9:
+                spans.setdefault(t.id, []).append((f0, f1))
             col = t.color or ink
             c = contrast(col, under)
             if c is not None and c < MIN_TEXT_CONTRAST:
@@ -1410,8 +1444,7 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
             t0, t1 = _shown_span(scene, t.id)
             if max(d0, t0) >= min(d1, t1) or _disc_cover(db, tb) < 0.9:
                 continue
-            if d0 <= t0 and t1 <= d1:
-                on_fill.add(t.id)
+            spans.setdefault(t.id, []).append((d0, d1))
             col, under = t.color or ink, d.color or ink
             c = contrast(col, under)
             if c is not None and c < MIN_TEXT_CONTRAST:
@@ -1420,6 +1453,16 @@ def _text_on_fill(scene: Scene, geo: Geometry, bg: str,
                                 f"it has a contrast of {c:.2f}:1 (measured)",
                                 "give the label or the dot a contrasting color, or move the label "
                                 "beside the dot", target=t.id, other=d.id))
+    # wholly on a fill or dot for as long as it is shown (a node recoloured by a
+    # transform hands over to the new dot): the background never shows behind it
+    for tid, sp in spans.items():
+        t0, t1 = _shown_span(scene, tid)
+        at = t0
+        for a, b in sorted(sp):
+            if a <= at:
+                at = max(at, b)
+        if at >= t1:
+            on_fill.add(tid)
     return out, on_fill
 
 

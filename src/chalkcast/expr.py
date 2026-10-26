@@ -22,7 +22,7 @@ MATH_NAMES: dict[str, Any] = {
     for name in (
         "sin", "cos", "tan", "exp", "sqrt", "log", "log10", "log2", "sinh", "cosh",
         "tanh", "arcsin", "arccos", "arctan", "arctan2", "floor", "ceil", "abs",
-        "sign", "heaviside", "where", "minimum", "maximum", "clip", "pi", "e",
+        "sign", "heaviside", "where", "minimum", "maximum", "clip", "pi", "e", "cbrt",
     )
 }
 MATH_NAMES["abs"] = np.abs
